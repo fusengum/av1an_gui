@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from .config import IS_WIN
 from .tools import popen_kwargs
 
 LogCB = Callable[[str], None]
@@ -25,6 +26,54 @@ class JobError(Exception):
 
 
 _SPLIT = re.compile(rb"[\r\n]+")
+
+
+# ------------------------------------------------------------------ 子プロセスごと止める（Windows）
+# Windows では親（av1an.exe など）を止めても、そこから起動されたエンコーダや ffmpeg は動き続ける。
+# 起動したプロセスをジョブオブジェクトに入れておき、止めるときはジョブごと終わらせる。
+# 子プロセスは自動でジョブに入る。このプロセス（サーバー）が落ちたときも一緒に止まる。
+
+def _win_job(p: subprocess.Popen):
+    import ctypes
+    from ctypes import wintypes
+
+    class Basic(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", ctypes.c_ulonglong * 6),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = Extended()
+    info.BasicLimitInformation.LimitFlags = 0x2000           # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    ok = k32.SetInformationJobObject(wintypes.HANDLE(job), 9, ctypes.byref(info), ctypes.sizeof(info)) and \
+        k32.AssignProcessToJobObject(wintypes.HANDLE(job), wintypes.HANDLE(int(p._handle)))
+    if not ok:
+        k32.CloseHandle(wintypes.HANDLE(job))
+        return None
+    return job
+
+
+def _win_job_kill(job) -> None:
+    import ctypes
+    from ctypes import wintypes
+    ctypes.windll.kernel32.TerminateJobObject(wintypes.HANDLE(job), 1)
+
+
+def _win_job_close(job) -> None:
+    import ctypes
+    from ctypes import wintypes
+    ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(job))
 
 
 class Runner:
@@ -55,6 +104,12 @@ class Runner:
                              stdout=stdout if stdout is not None else subprocess.PIPE,
                              stderr=subprocess.PIPE, **popen_kwargs())
         self.procs.append(p)
+        p._af_job = None  # type: ignore[attr-defined]
+        if IS_WIN:
+            try:
+                p._af_job = _win_job(p)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001  使えなくても taskkill で止める
+                pass
 
         def handle(line: str):
             try:
@@ -83,7 +138,15 @@ class Runner:
         for p in procs:
             for t in getattr(p, "_af_threads", []):
                 t.join(timeout=5)
+            self._close_job(p)          # 取り残された子プロセスがあれば、ここで一緒に終わる
         return [p.returncode for p in procs]
+
+    @staticmethod
+    def _close_job(p):
+        job = getattr(p, "_af_job", None)
+        if job:
+            p._af_job = None
+            _win_job_close(job)
 
     def run(self, cmd, **kw) -> None:
         p = self.start(cmd, **kw)
@@ -98,11 +161,20 @@ class Runner:
             except Exception:  # noqa: BLE001
                 pass
         for p in self.procs:
+            if IS_WIN:
+                # 親が終わっていても子が残っていることがあるため、状態にかかわらずジョブごと止める
+                job = getattr(p, "_af_job", None)
+                if job:
+                    _win_job_kill(job)
+                elif p.poll() is None:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True,
+                                   **popen_kwargs())
             if p.poll() is None:
                 try:
                     p.kill()
                 except OSError:
                     pass
+            self._close_job(p)
 
 
 # ------------------------------------------------------------------ 補助
