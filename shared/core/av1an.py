@@ -671,7 +671,11 @@ def run_av1an(runner, cmd: list, env, state_dir: Path, workers: int, prog, out: 
 
     done_json = state_dir / "done.json"
     scenes_json = state_dir / "scenes.json"
+    chunks_json = state_dir / "chunks.json"
     t0 = time.time()
+    # av1an は起動してすぐ（シーン検出の前）に空の done.json を作る。エンコードが始まったかは、シーン検出の後に
+    # 作る chunks.json で見る。再開（--resume で chunks.json と done.json が残っている）ならシーン検出はしない
+    resumed = "--resume" in [str(c) for c in cmd] and chunks_json.exists() and done_json.exists()
     sc_prog = sc_prog or (lambda label, f: prog(label, 0.0))
     st = {"sc_start": 0.0, "sc_f0": None, "sc_done": False, "enc_t0": 0.0, "enc_f0": None, "frac": 0.0,
           "chunks": 0}
@@ -681,11 +685,18 @@ def run_av1an(runner, cmd: list, env, state_dir: Path, workers: int, prog, out: 
             st["sc_start"] = time.time()
         return False                                      # ログにはそのまま出す
 
-    def scenes_ready() -> bool:
+    def fresh(p: Path) -> bool:
+        """この実行で作られたもの（前回の残りではない）"""
         try:
-            return scenes_json.stat().st_mtime >= t0 - 1
+            return p.stat().st_mtime >= t0 - 1
         except OSError:
             return False
+
+    def scenes_ready() -> bool:
+        return fresh(scenes_json)
+
+    def encoding() -> bool:
+        return done_json.exists() and (resumed or fresh(chunks_json))
 
     def scene_step():
         now = time.time()
@@ -746,7 +757,7 @@ def run_av1an(runner, cmd: list, env, state_dir: Path, workers: int, prog, out: 
     def poll():
         while p.poll() is None:
             try:
-                if done_json.exists():
+                if encoding():
                     encode_step(json.loads(done_json.read_text()))
                 elif st["sc_done"] or scenes_ready():
                     if not st["sc_done"]:
