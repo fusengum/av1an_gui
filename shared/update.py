@@ -450,7 +450,7 @@ def main(argv: list[str]) -> int:
         if r.get("error"):
             print(r["error"])
             return 1
-        print(f"いまの版 {r['current']} / 最新 {r['latest']}" + ("（更新できます）" if r["available"] else "（最新です）"))
+        print(f"現在のバージョン {r['current']} / 最新バージョン {r['latest']}" + ("（更新できます）" if r["available"] else "（最新です）"))
         return 0
     return apply([x for x in args.relaunch.split(",") if x])
 

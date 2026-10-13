@@ -12,6 +12,7 @@
   --cyan:#4fd6ff; --orange:#ff9e5e;
 }
 *{box-sizing:border-box}
+a{color:var(--run)} a:visited{color:#b9a8ff}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 "Segoe UI","Hiragino Sans","Noto Sans JP",system-ui,sans-serif}
 header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--line)}
 header img{width:30px;height:30px}
@@ -140,13 +141,6 @@ details.adv{margin-top:8px} details.adv>summary{cursor:pointer;color:var(--muted
 <!-- 環境 -->
 <section id="env">
   <div class="card">
-    <div class="row" style="justify-content:space-between"><h2 style="margin:0">このプログラム</h2>
-      <div><button class="b" onclick="loadUpdate(true)">更新を確認</button>
-      <button class="p" id="updbtn" style="display:none" onclick="applyUpdate()">更新する</button></div></div>
-    <div id="updinfo"></div>
-    <div id="updmsg" class="small muted"></div>
-  </div>
-  <div class="card">
     <div class="row" style="justify-content:space-between"><h2 style="margin:0">外部ツール</h2>
       <button class="p" id="instbtn" onclick="install(null)">不足ツールを自動セットアップ</button></div>
     <div id="instmsg" class="small muted"></div>
@@ -269,7 +263,8 @@ async function loadSet(){
     for(const sec of a.settings_sections||[]){const b=document.createElement('button');b.textContent=sec.title;b.dataset.k=a.id+'/'+sec.id;
       b.onclick=()=>openSec(a.id,sec.id);nav.appendChild(b)}}
   const w=document.createElement('button');w.textContent='Web 画面';w.dataset.k='/web';w.onclick=()=>openWeb();nav.appendChild(w);
-  if(CURSEC&&CURSEC[0]==='/web')openWeb();else if(CURSEC)openSec(...CURSEC);
+  const ab=document.createElement('button');ab.textContent='バージョン情報';ab.dataset.k='/about';ab.onclick=()=>openAbout();nav.appendChild(ab);
+  if(CURSEC&&CURSEC[0]==='/web')openWeb();else if(CURSEC&&CURSEC[0]==='/about')openAbout();else if(CURSEC)openSec(...CURSEC);
   else{const a=META.apps[0];if(a&&a.settings_sections?.length)openSec(a.id,a.settings_sections[0].id);else openWeb()}
 }
 function navOn(k){$('snav').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.k===k))}
@@ -317,6 +312,24 @@ async function saveSet(kind){
   for(const f of SECDEF(kind)){const top=f.key.split('.')[0];data[top]=s[top]}
   try{await api('/api/settings/'+kind,{method:'PUT',body:JSON.stringify(data)});$('setmsg').textContent='保存しました';setTimeout(()=>{const m=$('setmsg');if(m)m.textContent=''},2500)}
   catch(e){$('setmsg').textContent=e.message}}
+async function openAbout(){
+  CURSEC=['/about'];navOn('/about');const pg=$('spage');
+  let a;try{a=await api('/api/about')}catch(e){pg.textContent=e.message;return}
+  const x=(a.apps[0]||{}),ab=x.about||{};
+  const link=(u,t)=>`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(t||u)}</a>`;
+  pg.innerHTML=`<h2>${esc(x.name||'')} <span class="muted" style="font-weight:400">バージョン ${esc(a.version)}</span></h2>
+   <p class="note">${esc(x.desc||'')}</p>
+   <div class="ro"><div>作者</div><div>${esc(ab.author||'')}</div>
+   <div>ホームページ</div><div>${ab.homepage?link(ab.homepage):''}</div>
+   <div>ライセンス</div><div>${esc(ab.license||'（未設定）')}</div></div>
+   <h2 style="margin-top:18px">更新</h2>
+   <div class="row"><button class="b" onclick="loadUpdate(true)">更新を確認</button>
+     <button class="p" id="updbtn" style="display:none" onclick="applyUpdate()">更新する</button></div>
+   <div id="updinfo"></div><div id="updmsg" class="small muted"></div>
+   <h2 style="margin-top:18px">謝辞・使っているソフトウェア</h2><p class="note">${esc(ab.credits_note||'')}</p>
+   <table><thead><tr><th>名前</th><th>使いどころ</th><th>ライセンス</th></tr></thead><tbody>${(ab.credits||[]).map(c=>
+     `<tr><td>${c.url?link(c.url,c.name):esc(c.name)}</td><td class="small">${esc(c.role||'')}</td><td class="small">${esc(c.license||'')}</td></tr>`).join('')}</tbody></table>`;
+  loadUpdate(false)}
 async function openWeb(){
   CURSEC=['/web'];navOn('/web');const pg=$('spage');
   let w;try{w=await api('/api/web')}catch(e){pg.textContent=e.message;return}
@@ -340,20 +353,20 @@ async function assistCalc(save){try{const r=await api('/api/assist/'+ASK,{method
 async function loadEnvChip(){try{const r=await api('/api/env');const bad=r.tools.filter(t=>t.required&&!t.ok);const c=$('envchip');
   c.className='chip '+(bad.length?'ng':'ok');c.textContent=bad.length?'要セットアップ: '+bad.map(t=>t.label).join(', '):'環境 OK'}catch(e){}}
 async function loadUpdate(force){
+  if(!$('updinfo'))return;
   $('updmsg').textContent=force?'確認しています…':'';
   let u;try{u=await api('/api/update'+(force?'?force=1':''))}catch(e){$('updmsg').textContent=e.message;return}
-  $('updinfo').innerHTML=`いまの版 <b>${esc(u.current)}</b>`+(u.latest?`　／　最新 <b>${esc(u.latest)}</b>`:'')+
-    (u.available?' <span class="chip ok">新しい版があります</span>':(u.latest?' <span class="muted">（最新です）</span>':''))+
+  $('updinfo').innerHTML=`現在のバージョン <b>${esc(u.current)}</b>`+(u.latest?`　／　最新バージョン <b>${esc(u.latest)}</b>`:'')+
+    (u.available?' <span class="chip ok">新しいバージョンがあります</span>':(u.latest?' <span class="muted">（最新です）</span>':''))+
     (u.notes?`<pre class="log" style="max-height:200px;margin-top:8px">${esc(u.notes)}</pre>`:'');
   $('updbtn').style.display=u.available&&!u.apply.running?'':'none';
   const last=u.last||{};
   $('updmsg').textContent=u.apply.running?u.apply.message:(u.apply.error?'エラー: '+u.apply.error:(u.error?u.error:(last.message?'前回の更新: '+last.message:'')));
   if(u.apply.running)setTimeout(()=>loadUpdate(false),2000)}
 async function applyUpdate(){
-  if(!confirm('新しい版に入れ替えます。入れ替えの間（1〜数分）、Web 画面とデスクトップ版は止まり、終わると起動し直します。キューは残ります。よろしいですか？'))return;
+  if(!confirm('新しいバージョンに入れ替えます。入れ替えの間（1〜数分）、Web 画面とデスクトップ版は止まり、終わると起動し直します。キューは残ります。よろしいですか？'))return;
   try{await api('/api/update/apply',{method:'POST'});loadUpdate(false)}catch(e){$('updmsg').textContent=e.message}}
 async function loadEnv(){
-  loadUpdate(false);
   const r=await api('/api/env');
   $('tools').innerHTML=r.tools.map(t=>`<tr><td>${esc(t.label)}</td><td><span class="chip ${t.ok?'ok':'ng'}">${t.ok?'✔':(t.required?'✖':'—')}</span></td>
    <td class="small">${t.ok?esc(t.path)+'<br><span class="muted">'+esc(t.version)+'</span>':'<span class="muted">'+esc(t.note||'見つかりません')+'</span>'}</td>

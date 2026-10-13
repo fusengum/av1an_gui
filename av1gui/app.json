@@ -28,5 +28,133 @@
   ],
   "update": {
     "github": "fusengum/av1an_gui"
+  },
+  "about": {
+    "author": "ふうせん（fusengum）",
+    "homepage": "https://github.com/fusengum/av1an_gui",
+    "license": "MIT（LICENSE を参照）",
+    "credits_note": "av1an_gui は、次のソフトウェアを使っています。開発者のみなさんに感謝します。外部ツールはインストールのときに、それぞれの配布元から取得します（このアプリには含みません）。それぞれのライセンスに従ってお使いください。",
+    "credits": [
+      {
+        "name": "av1an",
+        "url": "https://github.com/rust-av/Av1an",
+        "license": "GPL-3.0",
+        "role": "映像を場面ごとに分けて、エンコーダを並列で動かす本体"
+      },
+      {
+        "name": "SVT-AV1",
+        "url": "https://gitlab.com/AOMediaCodec/SVT-AV1",
+        "license": "BSD-3-Clause-Clear",
+        "role": "AV1 エンコーダ"
+      },
+      {
+        "name": "libaom（aomenc）",
+        "url": "https://aomedia.googlesource.com/aom/",
+        "license": "BSD-2-Clause",
+        "role": "AV1 エンコーダ"
+      },
+      {
+        "name": "rav1e",
+        "url": "https://github.com/xiph/rav1e",
+        "license": "BSD-2-Clause",
+        "role": "AV1 エンコーダ"
+      },
+      {
+        "name": "x265",
+        "url": "https://bitbucket.org/multicoreware/x265_git",
+        "license": "GPL-2.0",
+        "role": "HEVC エンコーダ"
+      },
+      {
+        "name": "x264",
+        "url": "https://www.videolan.org/developers/x264.html",
+        "license": "GPL-2.0",
+        "role": "H.264 エンコーダ"
+      },
+      {
+        "name": "FFmpeg",
+        "url": "https://ffmpeg.org/",
+        "license": "LGPL-2.1 / GPL（取得するビルドは GPL）",
+        "role": "映像・音声の読み込み、解析、音声の変換"
+      },
+      {
+        "name": "MKVToolNix",
+        "url": "https://mkvtoolnix.download/",
+        "license": "GPL-2.0",
+        "role": "MKV の作成"
+      },
+      {
+        "name": "VapourSynth",
+        "url": "https://www.vapoursynth.com/",
+        "license": "LGPL-2.1",
+        "role": "分割方法 lsmash / ffms2 での映像の読み込み"
+      },
+      {
+        "name": "L-SMASH-Works",
+        "url": "https://github.com/HomeOfAviSynthPlusEvolution/L-SMASH-Works",
+        "license": "配布物の説明を参照（FFmpeg を含む）",
+        "role": "VapourSynth の読み込みプラグイン"
+      },
+      {
+        "name": "FFMS2",
+        "url": "https://github.com/FFMS/ffms2",
+        "license": "MIT（配布されているバイナリは GPL）",
+        "role": "VapourSynth の読み込みプラグイン"
+      },
+      {
+        "name": "MSYS2",
+        "url": "https://www.msys2.org/",
+        "license": "各パッケージのライセンス",
+        "role": "Windows 用のエンコーダとその DLL の配布元"
+      },
+      {
+        "name": "Python",
+        "url": "https://www.python.org/",
+        "license": "PSF-2.0",
+        "role": "このアプリの実行環境"
+      },
+      {
+        "name": "uv",
+        "url": "https://github.com/astral-sh/uv",
+        "license": "MIT / Apache-2.0",
+        "role": "Python とライブラリの導入"
+      },
+      {
+        "name": "Qt for Python（PySide6）",
+        "url": "https://www.qt.io/qt-for-python",
+        "license": "LGPL-3.0",
+        "role": "デスクトップ版の画面"
+      },
+      {
+        "name": "FastAPI",
+        "url": "https://fastapi.tiangolo.com/",
+        "license": "MIT",
+        "role": "Web 画面のサーバー"
+      },
+      {
+        "name": "Uvicorn",
+        "url": "https://www.uvicorn.org/",
+        "license": "BSD-3-Clause",
+        "role": "Web 画面のサーバー"
+      },
+      {
+        "name": "Pydantic",
+        "url": "https://docs.pydantic.dev/",
+        "license": "MIT",
+        "role": "Web 画面のデータの確認"
+      },
+      {
+        "name": "python-zstandard",
+        "url": "https://github.com/indygreg/python-zstandard",
+        "license": "BSD-3-Clause",
+        "role": "MSYS2 のパッケージの展開"
+      },
+      {
+        "name": "masterofzen/av1an（Docker イメージ）",
+        "url": "https://hub.docker.com/r/masterofzen/av1an",
+        "license": "含まれる各ツールのライセンス",
+        "role": "Linux での av1an とエンコーダ"
+      }
+    ]
   }
 }

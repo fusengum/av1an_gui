@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import importlib
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -60,16 +61,23 @@ class WebApp:
 
 
 _CACHE: dict[str, WebApp] | None = None
+_LOCK = threading.Lock()
 
 
 def load_apps() -> dict[str, WebApp]:
+    """入っているツールの WebApp。最初の 1 回だけ読み込む。
+    サーバーは問い合わせを並行して処理するため、読み込み終わるまで待たせ、途中の（空の）一覧を返さない"""
     global _CACHE
-    if _CACHE is None:
-        _CACHE = {}
-        for p in apps():
-            try:
-                mod = importlib.import_module(f"{p}.webapp")
-                _CACHE[p] = mod.make()
-            except Exception as e:  # noqa: BLE001
-                print(f"{app_name(p)} を Web 画面に読み込めません: {e}")
+    if _CACHE is not None:
+        return _CACHE
+    with _LOCK:
+        if _CACHE is None:
+            found = {}
+            for p in apps():
+                try:
+                    mod = importlib.import_module(f"{p}.webapp")
+                    found[p] = mod.make()
+                except Exception as e:  # noqa: BLE001
+                    print(f"{app_name(p)} を Web 画面に読み込めません: {e}")
+            _CACHE = found
     return _CACHE

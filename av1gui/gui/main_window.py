@@ -602,17 +602,28 @@ class AvMainWindow(QMainWindow):
         self._save()
 
         def extra():
-            u = self._upd                   # 確認済みの結果（ここで取りに行くと画面が止まるため）
-            lines =[f"{APP_NAME} {app_version()}" + (f"（新しい版 {u['latest']} があります。見出しの「更新」から入れ替えます）"
-                                                        if u.get("available") else
-                                                        (f"（{u['error']}）" if u.get("error") else "（最新です）"))]
+            lines = []
             for k in E.ENCODERS:
                 ok, msg = A.encoder_status(k, (self.s.encoder_paths or {}).get(k, ""))
                 lines.append(f"{E.ENCODER_LABELS[k].split('（')[0]}: {'使用可' if ok else '使用不可'}（{msg}）")
             return lines
 
+        def check_now():
+            u = U.check(force=True)
+            self._on_update_info(u, {}, "", 0.0)
+            return u
+
+        def update_now():
+            d.accept()
+            QTimer.singleShot(0, self._update_now)
+
+        from shared import app_infos
+        from shared.gui.about_page import AboutPage
+        info = next((i for i in app_infos() if i["pkg"] == KIND), {})
+        page = AboutPage(APP_NAME, app_version(), info.get("desc", ""), info.get("about") or {}, check=check_now,
+                         start_update=update_now, update_info=self._upd)
         d = SettingsDialog(self.s, self, tool_list=TOOL_LIST, tips=TIPS, extra_status=extra, sections=SECTIONS,
-                           client=self.client, tab=tab if self._refresh_env() else "tools")
+                           client=self.client, tab=tab if self._refresh_env() else "tools", about_page=page)
         d.changed.connect(self._refresh_env)
         d.exec()
         self._load()
@@ -659,7 +670,7 @@ class AvMainWindow(QMainWindow):
         self.upd_btn.setVisible(ok)
         if ok:
             self.upd_btn.setText(f"更新 {self._upd['latest']}")
-            self.upd_btn.setToolTip(f"いまの版 {self._upd['current']} → 新しい版 {self._upd['latest']}\n\n"
+            self.upd_btn.setToolTip(f"現在のバージョン {self._upd['current']} → 新しいバージョン {self._upd['latest']}\n\n"
                                     + (self._upd.get("notes") or "")[:1500])
 
     def _show_last_update(self):
@@ -708,7 +719,7 @@ class AvMainWindow(QMainWindow):
     def _on_downloaded(self, dlg, err):
         dlg.close()
         if err:
-            QMessageBox.warning(self, APP_NAME, f"新しい版を取得できませんでした。\n{err}")
+            QMessageBox.warning(self, APP_NAME, f"新しいバージョンを取得できませんでした。\n{err}")
             return
         try:
             U.spawn_apply([KIND])

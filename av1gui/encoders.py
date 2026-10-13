@@ -275,5 +275,5 @@ def drop_unsupported(enc: str, exe: str | None, args: list[str], log=None) -> li
             out += args[i:i + n]
         i += n
     if dropped and log:
-        log("注意: このエンコーダの版では使えない設定を外しました: " + " ".join(dropped))
+        log("注意: このエンコーダのバージョンでは使えない設定を外しました: " + " ".join(dropped))
     return out

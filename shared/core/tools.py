@@ -219,12 +219,12 @@ def install_mkvtoolnix(cb: ProgressCB) -> list[Path]:
     """Windows: MKVToolNix のポータブル版 zip を tools/mkvtoolnix に展開。Linux はパッケージで導入"""
     if not IS_WIN:
         raise RuntimeError("Linux では apt install mkvtoolnix などで導入してください")
-    cb("MKVToolNix の最新版を確認中…", -1)
+    cb("MKVToolNix の最新バージョンを確認中…", -1)
     with _open("https://mkvtoolnix.download/latest-release.xml") as r:
         xml = r.read().decode("utf-8", "replace")
     m = re.search(r"<version>\s*(\d+(?:\.\d+)+)\s*</version>", xml)
     if not m:
-        raise RuntimeError("MKVToolNix の最新版を特定できません")
+        raise RuntimeError("MKVToolNix の最新バージョンを特定できません")
     ver = m.group(1)
     bits = "32" if platform.machine().endswith("86") else "64"
     fn = f"mkvtoolnix-{bits}-bit-{ver}.zip"

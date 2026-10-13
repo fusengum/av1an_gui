@@ -46,14 +46,15 @@ class SettingsDialog(QDialog):
 
     def __init__(self, settings, parent=None, tool_list=None, tips: dict | None = None, extra_status=None,
                  folders: list[dict] | None = None, sections: list[dict] | None = None, actions: dict | None = None,
-                 section_extra=None, client=None, tab: str = ""):
+                 section_extra=None, client=None, tab: str = "", about_page: QWidget | None = None):
         """tool_list: tools.check_all 形式のツール一覧。extra_status: 追加表示する行（文字列リスト）を返す関数
         folders: 手動で指定するフォルダ（自動取得できないツールなど）の定義
             {"key": 設定名, "title": 見出し, "tip": 説明, "placeholder": 例, "note": 補足,
              "status": (settings) -> (ok: bool, 説明)}
         sections: 設定ページの定義（WebApp.settings_sections と同じ形式）。ページごとにタブを作る
         actions: ページのボタンの id → 処理。section_extra: (ページ id) -> ページの下に足すウィジェット or None
-        client: shared.web.client.Client。渡すと「Web 画面」タブを出す。tab: 最初に開くタブの id"""
+        client: shared.web.client.Client。渡すと「Web 画面」タブを出す。tab: 最初に開くタブの id
+        about_page: 「バージョン情報」タブに出すページ（shared.gui.about_page.AboutPage）"""
         super().__init__(parent)
         self.s = settings
         self.tool_list = tool_list or []
@@ -162,6 +163,10 @@ class SettingsDialog(QDialog):
         loc.setObjectName("muted")
         root.addWidget(loc)
         root.addStretch(1)
+
+        if about_page is not None:
+            about_page.setObjectName("about")
+            self.tabs.addTab(about_page, "バージョン情報")
 
         h = QHBoxLayout()
         h.addStretch(1)

@@ -668,16 +668,24 @@ def env_install(req: InstallReq):
 UPDATE = {"running": False, "message": "", "error": ""}
 
 
+@app.get("/api/about")
+def about():
+    """バージョン情報（各ツールの app.json の about）"""
+    from shared import app_infos
+    return {"version": VERSION, "apps": [{"pkg": i["pkg"], "name": i.get("name", i["pkg"]), "desc": i.get("desc", ""),
+                                          "about": i.get("about") or {}} for i in app_infos()]}
+
+
 @app.get("/api/update")
 def update_info(force: bool = False):
-    """いまの版と最新のリリース（1 日 1 回だけ取りに行く。force で今すぐ）"""
+    """現在のバージョンと最新のリリース（1 日 1 回だけ取りに行く。force で今すぐ）"""
     from shared import update as U
     return {**U.check(force), "apply": UPDATE, "last": U.last_status()}
 
 
 @app.post("/api/update/apply")
 def update_apply():
-    """新しい版を取ってきて、更新用のプロセスに入れ替えを任せる（サーバーと GUI は止まり、起動し直す）"""
+    """新しいバージョンを取ってきて、更新用のプロセスに入れ替えを任せる（サーバーと GUI は止まり、起動し直す）"""
     from shared import update as U
     if any(j.state == "running" for j in Q.list()):
         raise HTTPException(409, "エンコード中は更新できません。キューを停止するか、終わってから更新してください")
@@ -685,7 +693,7 @@ def update_apply():
         return {"ok": True}
     info = U.check()
     if not info.get("available"):
-        raise HTTPException(400, info.get("error") or "新しい版はありません")
+        raise HTTPException(400, info.get("error") or "新しいバージョンはありません")
 
     def run():
         UPDATE.update(running=True, error="", message="取得中…")

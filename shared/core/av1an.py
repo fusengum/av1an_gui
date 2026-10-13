@@ -172,7 +172,7 @@ def install_vsplugins(cb: ProgressCB) -> list[Path]:
     tar = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tar.exe"
     got = []
     for key, (dll, repo, label) in VSPLUGINS.items():
-        cb(f"{label} の最新版を確認中…", -1)
+        cb(f"{label} の最新バージョンを確認中…", -1)
         with _open(f"https://api.github.com/repos/{repo}/releases/latest") as r:
             rel = json.loads(r.read())
         assets = [a for a in rel.get("assets", []) if a["name"].lower().endswith((".7z", ".zip"))
