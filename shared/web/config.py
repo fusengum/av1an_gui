@@ -37,11 +37,14 @@ class WebConfig:
                        autostart=bool(d.get("autostart", False)))
         except (OSError, ValueError, TypeError):
             pass
-        # 設定ファイルが無い（以前の版で入れた）: 最後に動いたサーバーの待ち受けに合わせる
+        # 設定ファイルが無い（以前の版で入れた）: 自動起動が登録されていれば LAN 向け（以前のインストーラーは
+        # 0.0.0.0 で登録していた）。最後に動いたサーバーの待ち受けだけで決めると、デスクトップ版が立てた
+        # 127.0.0.1 のサーバーを引き継いでしまい、LAN から見えなくなる
         from .client import read_info
         info = read_info()
-        lan = info.get("host") == "0.0.0.0"
-        return cls(lan=lan, port=int(info.get("port") or DEFAULT_PORT), autostart=lan)
+        auto = bool(autostart_state())
+        lan = auto or info.get("host") == "0.0.0.0"
+        return cls(lan=lan, port=int(info.get("port") or DEFAULT_PORT), autostart=auto)
 
     def save(self) -> None:
         PATH.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
