@@ -15,13 +15,13 @@
 - デスクトップ版（Qt）と Web 画面（ブラウザから操作。VM・サーバー向け）。キューと進捗は両方で共通です
 - 終わった後のスリープ・休止状態・シャットダウン
 - 画面からの更新
-- Windows / Linux。**Python も入っていない状態から全自動で環境を作ります**
+- Windows / Linux。**Python も入っていない状態から全自動で環境を作ります**（Linux 版は未検証です）
 
 ## 動作環境
 
 | | |
 |---|---|
-| OS | Windows 10 / 11（64 ビット）、Linux（Debian / Ubuntu / Fedora 系） |
+| OS | Windows 10 / 11（64 ビット）、Linux（Debian / Ubuntu / Fedora 系。**未検証**） |
 | CPU | AVX2 が使える CPU をおすすめします（使えないとエンコーダが大幅に遅くなります） |
 | メモリ | 並列数に合わせて自動で調整します。4K の SVT-AV1 は 1 本あたり約 7 GB が目安です |
 | ディスク | 作業フォルダに、入力ファイルと同じくらいの空きがあると安心です |
@@ -40,6 +40,8 @@
 3. デスクトップの `av1an_gui` から起動します
 
 ### Linux（Debian / Ubuntu / Fedora 系）
+
+> **Linux 版は、まだ実際の環境で動作を確かめていません。** インストーラー・Docker での av1an の実行・シーン検出の進み具合・更新などは、Windows 版と同じ考え方で作ってありますが、うまく動かないことがあります。不具合があれば [Issues](https://github.com/fusengum/av1an_gui/issues) で知らせてください。
 
 ```bash
 ./install.sh
