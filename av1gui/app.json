@@ -20,6 +20,10 @@
     [
       "av1an_encoders",
       "AV1 エンコーダ（SVT-AV1 / aomenc / rav1e / x264）"
+    ],
+    [
+      "vsplugins",
+      "VapourSynth のプラグイン（L-SMASH-Works / FFMS2）"
     ]
   ],
   "update": {

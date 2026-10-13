@@ -73,9 +73,11 @@ TIPS = {
                        "その版で使えない設定は自動で外します（SVT-AV1 のみ）。Linux（Docker）では使えません。"),
     "chunk": _h("分割方法",
                 "映像の切り出し方です。<br>"
-                "・<b>自動</b>: Windows は hybrid、Linux（Docker）は lsmash<br>"
-                "・<b>hybrid / segment</b>: 追加の準備なしで使えます<br>"
-                "・<b>lsmash / ffms2 / bestsource</b>: 正確で速いですが、VapourSynth のプラグインが必要です"),
+                "・<b>自動</b>: lsmash → ffms2 → hybrid の順に、使えるものを選びます（Linux の Docker は lsmash）<br>"
+                "・<b>lsmash / ffms2</b>: 索引を作って必要な場面だけを読むので、エンコードを始めるまでが速いです。"
+                "VapourSynth のプラグイン（L-SMASH-Works / FFMS2）を使います（セットアップで自動取得します）<br>"
+                "・<b>hybrid / segment</b>: プラグインが要りませんが、キーフレームを調べるための読み込みと、"
+                "元と同じ大きさの切り出し（split）が増えるため、大きなファイルや HDD では準備に時間がかかります"),
     "sc": _h("シーン検出", "映像を場面の切れ目で分ける方法です。「速い」は検出が速いですが、切れ目の精度が下がります。"),
     "split": _h("分割の長さ",
                 "映像を場面の切れ目で分けるときの長さです。<br>"
@@ -90,6 +92,10 @@ TIPS = {
     "ffmpeg": '<b>FFmpeg / FFprobe</b><br>映像の読み込み・エンコードに使います。自動取得できます（x265 と NVENC を含みます）。',
     "mkvmerge": '<b>mkvmerge（MKVToolNix）</b><br>MKV を作るツールです。必須です。Windows では自動取得できます。',
     "av1an": _h("av1an", "映像を場面ごとに分けて、エンコーダを複数同時に動かす本体です。必須です。"),
+    "vsplugins": _h("VapourSynth のプラグイン",
+                    "分割方法 lsmash / ffms2 で使う、L-SMASH-Works と FFMS2 です。このフォルダの tools\\vsplugins に置き、"
+                    "av1an を動かすときだけ読み込ませます（PC に入っている VapourSynth の設定には触れません）。"
+                    "無くても hybrid で分割できます。"),
     "av1an_encoders": _h("AV1 エンコーダ", "SVT-AV1・aomenc・rav1e・x264。x265 は av1an と一緒に入ります。"
                          "Windows では自動取得、Linux では Docker イメージに含まれます。"),
 }

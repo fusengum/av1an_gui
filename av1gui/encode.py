@@ -29,7 +29,8 @@ from .config import AvSettings
 
 AUDIO_COPY, AUDIO_OPUS = "copy", "opus"
 AUDIO_LABELS = {AUDIO_COPY: "そのまま", AUDIO_OPUS: "Opus に変換"}   # 元の音声は必ず残す（外す選択肢は置かない）
-CHUNK_LABELS = {"auto": "自動", "hybrid": "hybrid（追加の準備不要）", "segment": "segment（分割ファイルを作る）",
+CHUNK_LABELS = {"auto": "自動（lsmash → ffms2 → hybrid）", "hybrid": "hybrid（プラグイン不要。切り出した複製を作る）",
+                "segment": "segment（分割ファイルを作る）",
                 "lsmash": "lsmash（要 VapourSynth プラグイン）", "ffms2": "ffms2（要 VapourSynth プラグイン）",
                 "bestsource": "bestsource（要 VapourSynth プラグイン）"}
 SC_LABELS = {"standard": "標準（正確）", "fast": "速い"}
@@ -252,7 +253,7 @@ class AvPipeline:
         vid = tmp / "video.mkv"
         vid.unlink(missing_ok=True)
 
-        chunk = s.chunk_method if s.chunk_method != "auto" else ("hybrid" if IS_WIN else "lsmash")
+        chunk = s.chunk_method if s.chunk_method != "auto" else A.auto_chunk_method()
         max_sec, min_len, split_how = split_params(s, info, workers)
         log(f"分割: 1 つ最大 {max_sec:g} 秒・最小 {min_len} フレーム（{split_how}）")
         common = ["-e", s.encoder, "-c", "mkvmerge", "-w", str(workers), "--pix-format", "yuv420p10le",

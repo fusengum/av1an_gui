@@ -21,6 +21,12 @@ from .config import IS_WIN, TOOLS_DIR
 from .tools import ProgressCB, _download, _open, popen_kwargs
 
 AV1AN_DIR = TOOLS_DIR / "av1an"
+# VapourSynth の読み込みプラグイン（分割方法 lsmash / ffms2 で使う）。このフォルダの tools\vsplugins にだけ置き、
+# av1an を起動するときだけ VAPOURSYNTH_EXTRA_PLUGIN_PATH で読ませる（利用者の VapourSynth の設定や
+# %APPDATA%\VapourSynth には触れない）。Linux は Docker イメージに同梱
+VSPLUGIN_DIR = TOOLS_DIR / "vsplugins"
+VSPLUGINS = {"lsmash": ("LSMASHSource.dll", "HomeOfAviSynthPlusEvolution/L-SMASH-Works", "L-SMASH-Works"),
+             "ffms2": ("ffms2.dll", "FFMS/ffms2", "FFMS2")}
 DOCKER_IMAGE = "masterofzen/av1an:master"
 AV1AN_EXE_URL = "https://github.com/rust-av/Av1an/releases/download/latest/av1an.exe"
 # 現在の av1an.exe は FFmpeg をライブラリとして持たない（ffmpeg.exe を呼ぶ）。
@@ -74,7 +80,124 @@ def windows_env() -> dict:
         pass
     paths.append(sys.base_prefix)
     env["PATH"] = os.pathsep.join(paths + [env.get("PATH", "")])
+    if VSPLUGIN_DIR.is_dir():
+        env["VAPOURSYNTH_EXTRA_PLUGIN_PATH"] = str(VSPLUGIN_DIR)
+    cfg = _vsscript_config()
+    if cfg:
+        env["APPDATA"] = str(cfg)
     return env
+
+
+def _vsscript_config() -> Path | None:
+    """VapourSynth R74 以降の VSScript は、使う Python を %APPDATA%\\vapoursynth\\vapoursynth.toml
+    （`vapoursynth config` が書く）から探す。これが無いと av1an は「VSScript API not available」で止まる。
+    利用者の %APPDATA% には書かず、このフォルダの tools\\vsconfig に同じ形のファイルを作り、av1an を起動するときだけ
+    APPDATA をそこに向ける。仮想環境を作り直すと Python の日時が変わるため、毎回いまの値で書き直す"""
+    try:
+        from vapoursynth import _utils as vsu
+    except Exception:  # noqa: BLE001  R74 より前（設定ファイルが要らない）か、VapourSynth が無い
+        return None
+    try:
+        if vsu._has_implicit_config():
+            return None                          # Python 本体と同じ場所にある（設定ファイルは要らない）
+        exe = Path(sys.executable)
+        if exe.name.lower() == "pythonw.exe" and exe.with_name("python.exe").is_file():
+            exe = exe.with_name("python.exe")
+        sym = vsu._find_python_symbol_path()
+        if not sym:
+            return None
+        q = vsu._escape_toml_string
+        line = (f"{q(vsu._mangle_vsscript_key(vsu.get_vsscript()))} = "
+                f"[{q(str(exe))},{q(sym)},{q(int(os.stat(exe).st_mtime))}]\n")
+        root = TOOLS_DIR / "vsconfig"
+        f = root / "vapoursynth" / "vapoursynth.toml"
+        if not f.is_file() or f.read_text(encoding="utf-8") != line:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(line, encoding="utf-8")
+        return root
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def vapoursynth_ok() -> bool:
+    try:
+        import vapoursynth  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def vs_plugins() -> list[str]:
+    """使える読み込みプラグイン（lsmash / ffms2）"""
+    if not IS_WIN:
+        return list(VSPLUGINS)
+    return [k for k, (dll, _r, _n) in VSPLUGINS.items() if (VSPLUGIN_DIR / dll).is_file()]
+
+
+def auto_chunk_method() -> str:
+    """分割方法の「自動」: lsmash → ffms2 → hybrid。
+    lsmash / ffms2 は索引を作って必要な場面だけを読むので、映像を切り出した複製（split）を作らずに済む。
+    hybrid はプラグインが要らない代わりに、キーフレームを調べるための読み込みと、元と同じ大きさの書き出しが増える"""
+    if not IS_WIN:
+        return "lsmash"
+    if vapoursynth_ok():
+        have = vs_plugins()
+        for m in ("lsmash", "ffms2"):
+            if m in have:
+                return m
+    return "hybrid"
+
+
+def vsplugins_status() -> tuple[bool, str]:
+    if not IS_WIN:
+        return True, "Docker イメージに同梱"
+    if not vapoursynth_ok():
+        return False, "VapourSynth が見つかりません（ライブラリを入れ直してください）"
+    have = vs_plugins()
+    names = [VSPLUGINS[k][2] for k in have]
+    if len(have) == len(VSPLUGINS):
+        return True, f"{' / '.join(names)}（{VSPLUGIN_DIR}）"
+    if have:
+        return True, f"{' / '.join(names)} のみ"
+    return False, "未導入"
+
+
+def install_vsplugins(cb: ProgressCB) -> list[Path]:
+    """L-SMASH-Works と FFMS2 の最新のリリースから 64 ビット版の DLL を取り、tools\vsplugins に置く。
+    配布物は 7z なので、Windows 10 以降に入っている tar.exe（libarchive）で展開する"""
+    import json
+    if not IS_WIN:
+        return []
+    VSPLUGIN_DIR.mkdir(parents=True, exist_ok=True)
+    tar = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tar.exe"
+    got = []
+    for key, (dll, repo, label) in VSPLUGINS.items():
+        cb(f"{label} の最新版を確認中…", -1)
+        with _open(f"https://api.github.com/repos/{repo}/releases/latest") as r:
+            rel = json.loads(r.read())
+        assets = [a for a in rel.get("assets", []) if a["name"].lower().endswith((".7z", ".zip"))
+                  and not any(x in a["name"].lower() for x in ("src", "source", "x86", "arm", "linux", "mac"))]
+        if not assets:
+            raise RuntimeError(f"{label} の配布物が見つかりません（{repo}）")
+        a = next((x for x in assets if "msvc" in x["name"].lower()), assets[0])
+        with tempfile.TemporaryDirectory() as td:
+            arc = _download(a["browser_download_url"], Path(td) / a["name"], cb, label)
+            cb(f"{label} を展開中…", -1)
+            out = Path(td) / "x"
+            out.mkdir()
+            r = subprocess.run([str(tar), "-xf", str(arc), "-C", str(out)], capture_output=True, text=True,
+                               **popen_kwargs())
+            if r.returncode != 0:
+                raise RuntimeError(f"{label} を展開できませんでした: {r.stderr.strip()[:200]}")
+            cands = [p for p in out.rglob(dll) if "x64" in [s.lower() for s in p.parts] or "win64" in str(p).lower()]
+            cands = cands or [p for p in out.rglob(dll) if "x86" not in [s.lower() for s in p.parts]]
+            if not cands:
+                raise RuntimeError(f"{label} の {dll} が配布物に見つかりません")
+            shutil.copy2(cands[0], VSPLUGIN_DIR / dll)
+            got.append(VSPLUGIN_DIR / dll)
+            (VSPLUGIN_DIR / f"{key}.version").write_text(rel.get("tag_name", ""), encoding="utf-8")
+    cb("VapourSynth のプラグインを取得しました", 1.0)
+    return got
 
 
 def status() -> tuple[bool, str]:
@@ -636,10 +759,18 @@ def _linux_read_pos(root_pid: int, target: str) -> int | None:
 
 
 def input_reader(container: str | None = None, inner_path: str = ""):
-    """シーン検出で入力を読んだバイト数を返す関数 f(av1an のプロセス) -> int | None を作る。
-    Windows は子プロセス（ffmpeg / vspipe）の読み込み量、Linux（Docker）はコンテナ内での読み位置"""
+    """入力をどこまで読んだかを返す関数 f(av1an のプロセス) -> int | (int, "cumulative") | None を作る。
+    Windows: 子プロセス（ffmpeg / vspipe）があればその読み込み量。無ければ（lsmash / ffms2 は av1an の中で
+    VapourSynth が読む）av1an 自身の読み込み量を "cumulative"（起動からの合計。段階の始まりの値を引いて使う）で返す。
+    Linux（Docker）: コンテナ内での読み位置"""
     if IS_WIN:
-        return lambda p: _win_read_bytes(p.pid)
+        def win(p):
+            n = _win_read_bytes(p.pid)
+            if n is not None:
+                return n
+            own = _win_own_read_bytes(p.pid)
+            return None if own is None else (own, "cumulative")
+        return win
     pid = [0]
 
     def f(_p):
@@ -759,8 +890,13 @@ def run_av1an(runner, cmd: list, env, state_dir: Path, workers: int, prog, out: 
         f = None
         if reader and src_size > 0:
             try:
-                n = reader(p)
-                f = min(n / src_size, 1.0) if n is not None else None
+                raw = reader(p)
+                n, kind = raw if isinstance(raw, tuple) else (raw, "pos")
+                if n is not None:
+                    if kind == "cumulative":          # 段階（準備 / シーン検出）の始まりからの分だけ数える
+                        base = st.setdefault("base", {}).setdefault("sc" if st["sc_start"] else "pre", n)
+                        n -= base
+                    f = min(max(n, 0) / src_size, 1.0)
             except Exception:  # noqa: BLE001  測れなくても処理は続ける
                 f = None
         if st["sc_start"]:

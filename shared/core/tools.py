@@ -100,9 +100,9 @@ def check_all(settings, tool_list=None, include_extra: bool = True) -> list[Tool
             res += h(settings)
 
     for name, label, req, ver_args, need in (tool_list or []):
-        if name in ("av1an", "av1an_encoders"):
+        if name in ("av1an", "av1an_encoders", "vsplugins"):
             from . import av1an as A
-            ok, msg = A.status() if name == "av1an" else A.encoders_status()
+            ok, msg = {"av1an": A.status, "av1an_encoders": A.encoders_status, "vsplugins": A.vsplugins_status}[name]()
             res.append(ToolStatus(name, label, req, msg if ok else None, note="" if ok else f"{msg}（{need}）",
                                   downloadable=True))
             continue
@@ -271,6 +271,15 @@ def install_av1an_encoders(cb: ProgressCB) -> list[Path]:
 
 
 INSTALLERS["av1an_encoders"] = install_av1an_encoders
+
+
+def install_vsplugins(cb: ProgressCB) -> list[Path]:
+    from . import av1an as A
+    return A.install_vsplugins(cb)
+
+
+if IS_WIN:
+    INSTALLERS["vsplugins"] = install_vsplugins
 
 
 def install_missing(settings, cb: ProgressCB, force: bool = False, tool_list=None) -> list[str]:

@@ -65,6 +65,7 @@
 すでに Python で開発している PC でも、その環境を変えないように作っています。
 
 - Python・ライブラリ・uv・外部ツール・設定・ログは、すべてこのフォルダの中に置きます（`tools/`、`.venv/` など）
+- VapourSynth のプラグインと、VapourSynth が使う Python の設定も、このフォルダの中（`tools/vsplugins`・`tools/vsconfig`）に置き、av1an を動かすときだけ読ませます。PC に入っている VapourSynth の設定（`%APPDATA%\vapoursynth` など）には触れません
 - PC にすでにある Python・uv・FFmpeg などは、条件に合えば**使うだけで、変更しません**。PATH・利用者のフォルダ（`~/.local/bin` など）・Windows のレジストリ（`py` ランチャーの一覧）にも何も足しません
 - このフォルダの外に作るもの:
   - Windows: デスクトップのショートカット、Web 画面の自動起動（ログオン時のタスク、またはスタートアップのショートカット）、ファイアウォールの規則（Web 画面のポートと、このフォルダの Python）
@@ -116,7 +117,7 @@
 |---|---|
 | 一般 | ファイル名の末尾、作業フォルダ、作業ファイルを残すか |
 | 追加時の既定 | これから追加するファイルの、種類・解像度・黒帯・音声の初めの値 |
-| 分割 | 分割の長さ（通常は「自動」のままで大丈夫です）、分割方法、シーン検出の方法 |
+| 分割 | 分割の長さ（通常は「自動」のままで大丈夫です）、分割方法（自動: lsmash → ffms2 → hybrid）、シーン検出の方法 |
 | Web 画面 | 他の PC のブラウザから使うか、ポート、自動起動 |
 | 外部ツール | FFmpeg などの検出と取得、いまの版 |
 
@@ -203,7 +204,11 @@
 
 ### 分割
 
-映像を場面の切れ目で分け、分けたもの（チャンク）を並列でエンコードします。「自動」では、1 つ最大 10 秒を基本に、短い映像では分割の数が並列数の 4 倍以上になるよう短くします（下限 2 秒）。最小の長さは 1 秒分のフレーム数（24 fps なら 24 フレーム）です。「短め（最大 5 秒）」「長め（最大 20 秒）」「手動で指定」も選べます。
+映像を場面の切れ目で分け、分けたもの（チャンク）を並列でエンコードします。
+
+分割方法の「自動」は、lsmash → ffms2 → hybrid の順に使えるものを選びます。lsmash / ffms2 は索引を作って必要な場面だけを読むので、エンコードを始めるまでが速くなります（VapourSynth のプラグイン L-SMASH-Works / FFMS2 を使います。Windows ではセットアップで自動取得し、Linux の Docker イメージには同梱されています）。hybrid はプラグインが要りませんが、キーフレームを調べるための読み込みと、元のファイルと同じ大きさの切り出しが増えるため、大きなファイルや HDD では準備に何分もかかることがあります。
+
+分割の長さの「自動」は、1 つ最大 10 秒を基本に、短い映像では分割の数が並列数の 4 倍以上になるよう短くします（下限 2 秒）。最小の長さは 1 秒分のフレーム数（24 fps なら 24 フレーム）です。「短め（最大 5 秒）」「長め（最大 20 秒）」「手動で指定」も選べます。
 
 ## コマンドライン
 
@@ -255,4 +260,6 @@ install*.ps1 / install.sh / uninstall* / web_firewall*   インストーラー�
 | [FFmpeg](https://ffmpeg.org/) | GPL（BtbN のビルド） | [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) |
 | [MKVToolNix](https://mkvtoolnix.download/) | GPL-2.0 | 公式 / パッケージ |
 | [VapourSynth](https://www.vapoursynth.com/) | LGPL-2.1 | PyPI |
+| [L-SMASH-Works](https://github.com/HomeOfAviSynthPlusEvolution/L-SMASH-Works) | 配布物の説明を参照（FFmpeg を含む） | GitHub Releases（Windows）/ Docker イメージ（Linux） |
+| [FFMS2](https://github.com/FFMS/ffms2) | MIT（配布されているバイナリは GPL） | GitHub Releases（Windows）/ Docker イメージ（Linux） |
 | [uv](https://github.com/astral-sh/uv) | MIT / Apache-2.0 | GitHub Releases |
