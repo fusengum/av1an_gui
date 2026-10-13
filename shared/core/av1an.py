@@ -511,36 +511,260 @@ def available_memory_gb() -> float:
     return 0.0
 
 
-def run_av1an(runner, cmd: list, env, state_dir: Path, workers: int, prog, out: Path, log=None) -> None:
-    """av1an を実行し、done.json から進捗を出す。失敗したら RuntimeError"""
+# ---------------------------------------------------------------- 進み具合の取得
+# av1an はパイプにつないだ stderr には進捗バーを出さない（端末のときだけ描く）。
+# シーン検出: 入力ファイルをどこまで読んだかを OS から調べる。
+# エンコード: done.json はチャンクが終わったときしか増えないため、作業中のチャンクの出力サイズからも見積もる。
+
+def _fmt_time(sec: float) -> str:
+    sec = int(max(sec, 0))
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
+
+
+def _win_read_bytes(root_pid: int, names=("ffmpeg.exe", "vspipe.exe")) -> int | None:
+    """root_pid の子孫のうち、入力を読むプロセス（ffmpeg / vspipe）の読み込み量。複数あれば少ない方
+    （フレーム数を数えるだけの速い方ではなく、シーン検出で読んでいる方）"""
+    import ctypes
+    from ctypes import wintypes
+
+    class PE(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+    class IO(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                                                      "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.OpenProcess.restype = wintypes.HANDLE
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)              # TH32CS_SNAPPROCESS
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        return None
+    procs = []
+    try:
+        e = PE()
+        e.dwSize = ctypes.sizeof(PE)
+        ok = k32.Process32FirstW(wintypes.HANDLE(snap), ctypes.byref(e))
+        while ok:
+            procs.append((e.th32ProcessID, e.th32ParentProcessID, e.szExeFile.lower()))
+            ok = k32.Process32NextW(wintypes.HANDLE(snap), ctypes.byref(e))
+    finally:
+        k32.CloseHandle(wintypes.HANDLE(snap))
+    tree, todo = set(), [root_pid]
+    while todo:
+        cur = todo.pop()
+        for pid, ppid, _ in procs:
+            if ppid == cur and pid not in tree and pid != root_pid:
+                tree.add(pid)
+                todo.append(pid)
+    best = None
+    for pid, _, name in procs:
+        if pid not in tree or name not in names:
+            continue
+        h = k32.OpenProcess(0x1000, False, pid)              # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            continue
+        try:
+            io = IO()
+            if k32.GetProcessIoCounters(wintypes.HANDLE(h), ctypes.byref(io)):
+                best = io.ReadTransferCount if best is None else min(best, io.ReadTransferCount)
+        finally:
+            k32.CloseHandle(wintypes.HANDLE(h))
+    return best
+
+
+def _linux_read_pos(root_pid: int, target: str) -> int | None:
+    """root_pid とその子孫が開いている target（コンテナ内のパス）の読み位置。複数あれば小さい方"""
+    kids: dict[int, list[int]] = {}
+    for e in os.listdir("/proc"):
+        if not e.isdigit():
+            continue
+        try:
+            with open(f"/proc/{e}/stat") as f:
+                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        kids.setdefault(ppid, []).append(int(e))
+    best, todo = None, [root_pid]
+    while todo:
+        pid = todo.pop()
+        todo += kids.get(pid, [])
+        try:
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(f"/proc/{pid}/fd/{fd}") != target:
+                    continue
+                with open(f"/proc/{pid}/fdinfo/{fd}") as f:
+                    pos = next(int(x.split()[1]) for x in f if x.startswith("pos:"))
+                best = pos if best is None else min(best, pos)
+            except (OSError, ValueError, StopIteration):
+                continue
+    return best
+
+
+def input_reader(container: str | None = None, inner_path: str = ""):
+    """シーン検出で入力を読んだバイト数を返す関数 f(av1an のプロセス) -> int | None を作る。
+    Windows は子プロセス（ffmpeg / vspipe）の読み込み量、Linux（Docker）はコンテナ内での読み位置"""
+    if IS_WIN:
+        return lambda p: _win_read_bytes(p.pid)
+    pid = [0]
+
+    def f(_p):
+        if not pid[0]:
+            r = subprocess.run([docker_bin(), "inspect", "-f", "{{.State.Pid}}", container],
+                               capture_output=True, text=True, timeout=10)
+            pid[0] = int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+            if not pid[0]:
+                return None
+        return _linux_read_pos(pid[0], inner_path)
+    return f
+
+
+def _chunk_files(enc_dir: Path) -> dict[str, int]:
+    """作業フォルダ encode/ のチャンク出力（名前 → サイズ）"""
+    out = {}
+    try:
+        for f in enc_dir.iterdir():
+            if f.is_file():
+                out[f.stem] = out.get(f.stem, 0) + f.stat().st_size
+    except OSError:
+        pass
+    return out
+
+
+def _done_frames(v) -> int:
+    """done.json の 1 チャンク分。古い av1an は数値、新しい av1an は {"frames": n, "size_bytes": n}"""
+    if isinstance(v, dict):
+        return int(v.get("frames") or 0)
+    return int(v or 0)
+
+
+def _done_bytes(v) -> int:
+    return int(v.get("size_bytes") or 0) if isinstance(v, dict) else 0
+
+
+def _chunk_count(chunks_json: Path) -> int:
+    import json
+    try:
+        d = json.loads(chunks_json.read_text())
+    except (OSError, ValueError):
+        return 0
+    if isinstance(d, dict):
+        d = next((v for v in d.values() if isinstance(v, list)), [])
+    return len(d) if isinstance(d, list) else 0
+
+
+def run_av1an(runner, cmd: list, env, state_dir: Path, workers: int, prog, out: Path, log=None,
+              sc_prog=None, src_size: int = 0, reader=None) -> None:
+    """av1an を実行し、進捗を出す。失敗したら RuntimeError
+    - シーン検出: stderr の「Scene detection」で始まりを知り、reader（input_reader）で入力の読み具合を測る → sc_prog
+    - エンコード: done.json（終わったチャンク）＋作業中のチャンクの出力サイズからの見積もり → prog"""
     import json
     import threading
     import time
 
     done_json = state_dir / "done.json"
+    scenes_json = state_dir / "scenes.json"
     t0 = time.time()
-    start_done = [None]
+    sc_prog = sc_prog or (lambda label, f: prog(label, 0.0))
+    st = {"sc_start": 0.0, "sc_f0": None, "sc_done": False, "enc_t0": 0.0, "enc_f0": None, "frac": 0.0,
+          "chunks": 0}
+
+    def on_line(line: str) -> bool:
+        if not st["sc_start"] and "Scene detection" in line:
+            st["sc_start"] = time.time()
+        return False                                      # ログにはそのまま出す
+
+    def scenes_ready() -> bool:
+        try:
+            return scenes_json.stat().st_mtime >= t0 - 1
+        except OSError:
+            return False
+
+    def scene_step():
+        now = time.time()
+        f = None
+        if reader and src_size > 0:
+            try:
+                n = reader(p)
+                f = min(n / src_size, 1.0) if n is not None else None
+            except Exception:  # noqa: BLE001  測れなくても処理は続ける
+                f = None
+        if st["sc_start"]:
+            el = now - st["sc_start"]
+            if f is None:
+                sc_prog(f"シーン検出中（経過 {_fmt_time(el)}）", 0.0)
+                return
+            if st["sc_f0"] is None:
+                st["sc_f0"] = f
+            rest = ""
+            if el > 10 and f > st["sc_f0"]:
+                rest = f", 残り {_fmt_time((1 - f) * el / (f - st['sc_f0']))}"
+            sc_prog(f"シーン検出中 {f * 100:.0f}%（経過 {_fmt_time(el)}{rest}）", f)
+        else:
+            what = f"入力を読み込み中 {f * 100:.0f}%、" if f else ""
+            sc_prog(f"av1an を準備中（{what}経過 {_fmt_time(now - t0)}）", 0.0)
+
+    def encode_step(d: dict):
+        now = time.time()
+        total = d.get("frames") or 1
+        done_map = d.get("done", {}) or {}
+        done = sum(_done_frames(v) for v in done_map.values())
+        if not st["chunks"]:
+            st["chunks"] = _chunk_count(state_dir / "chunks.json")
+        files = _chunk_files(state_dir / "encode")
+        # 終わったチャンクの 1 フレームあたりのサイズから、作業中のチャンクが何フレーム進んだかを見積もる
+        done_bytes = sum(_done_bytes(v) or files.get(k, 0) for k, v in done_map.items())
+        active = {k: v for k, v in files.items() if k not in done_map}
+        partial = 0.0
+        if done and done_bytes:
+            partial = sum(active.values()) / (done_bytes / done)
+        f = min((done + partial) / total, 0.999)
+        f = st["frac"] = max(st["frac"], f)               # 見積もりの揺れで戻らないようにする
+        if st["enc_f0"] is None:
+            st["enc_t0"], st["enc_f0"] = now, f           # 再開時は、それまでの分を速度計算から除く
+        el = now - st["enc_t0"]
+        parts = [f"{workers} 本"]
+        n = st["chunks"]
+        parts.append(f"チャンク {len(done_map)}/{n} 完了" if n else f"チャンク {len(done_map)} 完了")
+        if not done_map:
+            mb = sum(active.values()) / 1e6
+            parts.append(f"最初のチャンクを処理中・出力 {mb:.1f} MB")
+        elif el > 10 and f > st["enc_f0"]:
+            fps = (f - st["enc_f0"]) * total / el
+            parts.append(f"{fps:.1f} fps")
+            parts.append(f"残り {_fmt_time((1 - f) * total / fps)}")
+        parts.append(f"経過 {_fmt_time(now - t0)}")
+        prog(f"並列エンコード中（{', '.join(parts)}）", f)
 
     def poll():
         while p.poll() is None:
             try:
-                d = json.loads(done_json.read_text())
-                total = d.get("frames") or 1
-                done = sum(d.get("done", {}).values())
-                if start_done[0] is None:
-                    start_done[0] = done          # 再開時は、それまでの分を速度計算から除く
-                el = time.time() - t0
-                fps = (done - start_done[0]) / el if el > 5 else 0
-                eta = ""
-                if fps > 0:
-                    rest = (total - done) / fps
-                    eta = f", 残り {int(rest // 3600)}:{int(rest % 3600 // 60):02d}"
-                prog(f"並列エンコード中（{workers} 本, {fps:.1f} fps{eta}）", done / total)
-            except Exception:  # noqa: BLE001
-                pass
-            time.sleep(2)
+                if done_json.exists():
+                    encode_step(json.loads(done_json.read_text()))
+                elif st["sc_done"] or scenes_ready():
+                    if not st["sc_done"]:
+                        st["sc_done"] = True
+                        if log and st["sc_start"]:
+                            log(f"シーン検出が終わりました（{_fmt_time(time.time() - st['sc_start'])}）")
+                    sc_prog("分割を準備中", 1.0)
+                else:
+                    scene_step()
+            except ValueError:
+                pass                                      # av1an が書いている途中の JSON。次の回に読む
+            except Exception as e:  # noqa: BLE001  進捗が出せなくてもエンコードは続ける
+                if log and not st.get("warned"):
+                    st["warned"] = True
+                    log(f"警告: 進捗を読み取れません（{type(e).__name__}: {e}）")
+            time.sleep(1)
 
-    p = runner.start(cmd, env=env)
+    p = runner.start(cmd, env=env, on_line=on_line)
     th = threading.Thread(target=poll, daemon=True)
     th.start()
     rc, = runner.wait(p)

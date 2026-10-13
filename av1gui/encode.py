@@ -143,7 +143,7 @@ class AvPipeline:
 
         out_dir = Path(s.output_dir) if s.output_dir else job.src.parent
         out_dir.mkdir(parents=True, exist_ok=True)
-        stages = [("prep", 0.03), ("encode", 0.9), ("audio", 0.03 if job.audio == AUDIO_OPUS else 0.0),
+        stages = [("prep", 0.03), ("scene", 0.07), ("encode", 0.83), ("audio", 0.03 if job.audio == AUDIO_OPUS else 0.0),
                   ("mux", 0.04)]
         tot = sum(w for _, w in stages)
         base, acc = {}, 0.0
@@ -243,7 +243,10 @@ class AvPipeline:
             runner.on_cancel = lambda: subprocess.run([A.docker_bin(), "kill", name], capture_output=True)
         log(f"av1an: {s.encoder} / 分割 {chunk} / 並列 {workers}")
         try:
-            A.run_av1an(runner, cmd, env, state_dir, workers, lambda lbl, f: prog("encode", lbl, f), vid, log)
+            reader = A.input_reader() if IS_WIN else A.input_reader(name, f"/in/{info.path.name}")
+            A.run_av1an(runner, cmd, env, state_dir, workers, lambda lbl, f: prog("encode", lbl, f), vid, log,
+                        sc_prog=lambda lbl, f: prog("scene", lbl, f), src_size=info.path.stat().st_size,
+                        reader=reader)
         except RuntimeError as e:
             raise JobError(str(e)) from None
 
