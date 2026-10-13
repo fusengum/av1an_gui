@@ -576,6 +576,33 @@ def _win_read_bytes(root_pid: int, names=("ffmpeg.exe", "vspipe.exe")) -> int | 
     return best
 
 
+def _win_own_read_bytes(pid: int) -> int | None:
+    """そのプロセス自身の読み込み量（Windows）"""
+    import ctypes
+    from ctypes import wintypes
+
+    class IO(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                                                      "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    h = k32.OpenProcess(0x1000, False, pid)
+    if not h:
+        return None
+    try:
+        io = IO()
+        return io.ReadTransferCount if k32.GetProcessIoCounters(wintypes.HANDLE(h), ctypes.byref(io)) else None
+    finally:
+        k32.CloseHandle(wintypes.HANDLE(h))
+
+
+def _dir_bytes(d: Path) -> int:
+    try:
+        return sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+    except OSError:
+        return 0
+
+
 def _linux_read_pos(root_pid: int, target: str) -> int | None:
     """root_pid とその子孫が開いている target（コンテナ内のパス）の読み位置。複数あれば小さい方"""
     kids: dict[int, list[int]] = {}
@@ -678,11 +705,16 @@ def run_av1an(runner, cmd: list, env, state_dir: Path, workers: int, prog, out: 
     resumed = "--resume" in [str(c) for c in cmd] and chunks_json.exists() and done_json.exists()
     sc_prog = sc_prog or (lambda label, f: prog(label, 0.0))
     st = {"sc_start": 0.0, "sc_f0": None, "sc_done": False, "enc_t0": 0.0, "enc_f0": None, "frac": 0.0,
-          "chunks": 0}
+          "chunks": 0, "queue": False, "prep_t0": 0.0, "prep_r0": None}
 
     def on_line(line: str) -> bool:
         if not st["sc_start"] and "Scene detection" in line:
             st["sc_start"] = time.time()
+        if "Queue" in line and "Workers" in line:        # av1an がチャンクの一覧を作り終え、エンコードを始めた
+            st["queue"] = True
+            m = re.search(r"Queue\s+(\d+)", line)
+            if m and not st["chunks"]:
+                st["chunks"] = int(m.group(1))            # チャンクの数（chunks.json を読めないときにも出せるように）
         return False                                      # ログにはそのまま出す
 
     def fresh(p: Path) -> bool:
@@ -696,7 +728,31 @@ def run_av1an(runner, cmd: list, env, state_dir: Path, workers: int, prog, out: 
         return fresh(scenes_json)
 
     def encoding() -> bool:
-        return done_json.exists() and (resumed or fresh(chunks_json))
+        # 合図はどれか 1 つで足りる: chunks.json（この実行で作られたもの）、ログの「Queue … Workers …」、再開
+        return done_json.exists() and (resumed or st["queue"] or fresh(chunks_json))
+
+    def prep_step():
+        """シーン検出の後、エンコードの前: hybrid / segment は、キーフレームを調べてから映像を切り出す（split）"""
+        now = time.time()
+        if not st["prep_t0"]:
+            st["prep_t0"] = now
+        el = _fmt_time(now - st["prep_t0"])
+        cut = _dir_bytes(state_dir / "split")
+        if cut and src_size:
+            f = min(cut / src_size, 1.0)
+            sc_prog(f"分割を準備中: 映像を切り出しています {f * 100:.0f}%（経過 {el}）", 1.0)
+            return
+        what = ""
+        if IS_WIN and src_size:
+            try:
+                n = _win_own_read_bytes(p.pid)
+            except Exception:  # noqa: BLE001
+                n = None
+            if n is not None:
+                if st["prep_r0"] is None:
+                    st["prep_r0"] = n                     # シーン検出までに読んだ分は除く
+                what = f" {min((n - st['prep_r0']) / src_size, 1.0) * 100:.0f}%"
+        sc_prog(f"分割を準備中: キーフレームを調べています{what}（経過 {el}）", 1.0)
 
     def scene_step():
         now = time.time()
@@ -764,7 +820,7 @@ def run_av1an(runner, cmd: list, env, state_dir: Path, workers: int, prog, out: 
                         st["sc_done"] = True
                         if log and st["sc_start"]:
                             log(f"シーン検出が終わりました（{_fmt_time(time.time() - st['sc_start'])}）")
-                    sc_prog("分割を準備中", 1.0)
+                    prep_step()
                 else:
                     scene_step()
             except ValueError:

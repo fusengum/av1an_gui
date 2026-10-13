@@ -248,8 +248,17 @@ def _files(root: Path) -> list[str]:
     return sorted(out)
 
 
+def _venv_python() -> Path | None:
+    """このフォルダの .venv の python（ライブラリを入れる先は、ここだけ）"""
+    p = ROOT / ".venv" / ("Scripts/python.exe" if IS_WIN else "bin/python")
+    return p if p.is_file() else None
+
+
 def _python() -> str:
-    """ライブラリを入れる先の python（venv の python.exe）"""
+    """セットアップなどを動かす python。このフォルダの .venv があればそれ"""
+    v = _venv_python()
+    if v:
+        return str(v)
     exe = Path(sys.executable)
     if IS_WIN and exe.name.lower() == "pythonw.exe" and exe.with_name("python.exe").exists():
         return str(exe.with_name("python.exe"))
@@ -264,13 +273,19 @@ def _run(cmd: list[str], env=None) -> subprocess.CompletedProcess:
 
 
 def _pip_install() -> None:
-    """requirements.txt のライブラリを入れる（インストーラーと同じく uv を使う。無ければ pip）"""
+    """requirements.txt のライブラリを、このフォルダの .venv にだけ入れる（インストーラーと同じく uv を使う。無ければ pip）。
+    .venv が無い（利用者自身の Python で動かしている）ときは、その環境を変えないよう入れずにエラーにする"""
+    venv = _venv_python()
+    if venv is None:
+        raise UpdateError("このフォルダの .venv が無いため、ライブラリを入れ直せません（利用者の Python 環境は変えません）")
     uvs = [ROOT / "tools" / "uv" / ("uv.exe" if IS_WIN else "uv")]
     uv = next((str(p) for p in uvs if p.is_file()), None) or shutil.which("uv")
     env = dict(os.environ, UV_PYTHON_INSTALL_DIR=str(ROOT / "tools" / "python"),
+               UV_PYTHON_BIN_DIR=str(ROOT / "tools" / "python" / "bin"), UV_PYTHON_INSTALL_BIN="0",
+               UV_PYTHON_INSTALL_REGISTRY="0", UV_NO_CONFIG="1",
                UV_CACHE_DIR=str(ROOT / "tools" / "uv-cache"), UV_NO_PROGRESS="1", PYTHONUTF8="1")
     req = str(ROOT / "requirements.txt")
-    cmd = [uv, "pip", "install", "--python", _python(), "-r", req] if uv else [_python(), "-m", "pip", "install", "-r", req]
+    cmd = [uv, "pip", "install", "--python", str(venv), "-r", req] if uv else [str(venv), "-m", "pip", "install", "-r", req]
     r = _run(cmd, env)
     if r.returncode != 0:
         tail = (r.stderr or r.stdout).strip().splitlines()[-1:] or [""]

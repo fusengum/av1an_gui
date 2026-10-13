@@ -20,7 +20,7 @@ from shared.core.video import CROP_AUTO, CROP_LABELS, RES_1080, RES_LABELS, dete
 from shared.core.tuning import CONTENT_FILM, CONTENT_LABELS, split_extra
 from shared.core import av1an as A
 from shared.core import probe as P
-from shared.core.config import IS_WIN
+from shared.core.config import APP_ROOT, IS_WIN
 from shared.core.runner import Cancelled, JobError, Runner, ascii_work_root, unique_path  # noqa: F401
 from shared.core.tools import find_tool
 
@@ -292,6 +292,7 @@ class AvPipeline:
             name = f"av1gui_{key}"
             subprocess.run([A.docker_bin(), "rm", "-f", name], capture_output=True)
             cmd = [A.docker_bin(), "run", "--rm", "--name", name, "--user", uid,
+                   "--label", f"av1an_gui.root={APP_ROOT}",          # アンインストールで、このフォルダのものだけを止める
                    "-v", f"{info.path.parent}:/in:ro", "-v", f"{tmp}:/work", A.DOCKER_IMAGE,
                    "-i", f"/in/{info.path.name}", "-o", "/work/video.mkv", "--temp", "/work/tmp", "-m", chunk,
                    *common]

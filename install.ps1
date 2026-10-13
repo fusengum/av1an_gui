@@ -49,21 +49,33 @@ try {
     elseif ($sysUv -and -not $Force) { $Uv = $sysUv.Source; Mark 'uv' 'skip' 'uv（導入済み）'; Say "uv: $Uv" }
     else {
         $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
-        $zip = Join-Path $env:TEMP 'uv.zip'
+        $zip = Join-Path $env:TEMP "av1an_gui_uv_$PID.zip"
         Invoke-WebRequest "https://github.com/astral-sh/uv/releases/latest/download/uv-$arch-pc-windows-msvc.zip" -OutFile $zip -UseBasicParsing
         New-Item -ItemType Directory -Force -Path $UvDir | Out-Null
         Expand-Archive $zip -DestinationPath $UvDir -Force
         Remove-Item $zip
         Mark 'uv' 'ok' 'uv（Python の管理ツール）'
     }
+    # uv が、このフォルダの外（利用者の環境）に何も残さないようにする
+    #   - Python は tools\python だけに置き、利用者のフォルダ（%USERPROFILE%\.local\bin）に実行ファイルを置かない
+    #   - Windows のレジストリに登録しない（py ランチャーの一覧に出さない）
+    #   - 利用者や親フォルダの uv の設定ファイル（uv.toml・pyproject.toml）を読まない
     $env:UV_PYTHON_INSTALL_DIR = Join-Path $Tools 'python'
+    $env:UV_PYTHON_BIN_DIR = Join-Path $Tools 'python\bin'
+    $env:UV_PYTHON_INSTALL_BIN = '0'
+    $env:UV_PYTHON_INSTALL_REGISTRY = '0'
+    $env:UV_NO_CONFIG = '1'
     $env:UV_CACHE_DIR = Join-Path $Tools 'uv-cache'
     $env:UV_NO_PROGRESS = '1'
 
     # 動いている Web 画面を止める（ライブラリのファイルが使用中だと更新できないため。最後に起動し直す）
+    # 止めるのはこのフォルダのものだけ（実行ファイルがこのフォルダの中か、コマンドラインにこのフォルダがあるもの）
     Stop-ScheduledTask -TaskName $WebName -ErrorAction SilentlyContinue
+    $AppDir = $App.TrimEnd('\') + '\'
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*-m shared.web*' } |
+        Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*-m shared.web*' -and
+            (($_.ExecutablePath -and $_.ExecutablePath.StartsWith($AppDir, [StringComparison]::OrdinalIgnoreCase)) -or
+             $_.CommandLine.IndexOf($AppDir, [StringComparison]::OrdinalIgnoreCase) -ge 0) } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
     # 2. Python と仮想環境
@@ -80,7 +92,13 @@ try {
         try { & $exe -c "import sys; sys.exit(0 if (3, 12) <= sys.version_info[:2] < (3, 14) else 1)" 2>$null; return ($LASTEXITCODE -eq 0) } catch { return $false }
     }
     function New-Venv([string]$pyArg) {
-        if (Test-Path $VenvDir) { Remove-Item -Recurse -Force $VenvDir }
+        if (Test-Path $VenvDir) {
+            $item = Get-Item -LiteralPath $VenvDir -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw ".venv がリンクになっています（$VenvDir）。リンク先を壊さないよう、作り直しません。.venv を別の名前に変えてから実行し直してください"
+            }
+            & cmd.exe /c rd /s /q "`"$VenvDir`""        # rd はリンクをたどらない
+        }
         if ((Run $Uv @('venv', '--python', $pyArg, $VenvDir)) -ne 0) { throw '仮想環境を作れませんでした' }
     }
     Mark 'python' 'run' "Python $PyMin 以上"

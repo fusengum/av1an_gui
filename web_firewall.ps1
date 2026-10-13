@@ -26,15 +26,18 @@ Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |
 
 # ポートを許可（ネットワークの種類を問わない。VM はパブリック扱いになることが多い）
 New-NetFirewallRule -DisplayName $Name -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -Profile Any | Out-Null
-# 実際に待ち受ける Python 本体も許可（venv の pythonw.exe は本体を子プロセスで起動するため両方）
+# 実際に待ち受ける Python 本体も許可（venv の pythonw.exe は本体を子プロセスで起動するため両方）。
+# このフォルダの中のもの（.venv と、tools\python に取得した Python）だけ。PC に入っている Python には規則を足さない
+# （その Python で動く、利用者自身のプログラムまで受信を許可してしまうため。ポートの規則で足りる）
 $py = Join-Path $App '.venv\Scripts\python.exe'
 $progs = @((Join-Path $App '.venv\Scripts\pythonw.exe'), $py)
 if (Test-Path $py) {
     $base = & $py -c "import sys, os; print(os.path.dirname(sys._base_executable))"
     if ($base) { $progs += @((Join-Path $base 'pythonw.exe'), (Join-Path $base 'python.exe')) }
 }
+$AppDir = $App.TrimEnd('\') + '\'
 foreach ($pg in $progs | Select-Object -Unique) {
-    if (Test-Path $pg) {
+    if ((Test-Path $pg) -and $pg.StartsWith($AppDir, [StringComparison]::OrdinalIgnoreCase)) {
         New-NetFirewallRule -DisplayName $Name -Direction Inbound -Program $pg -Protocol TCP -LocalPort $Port -Action Allow -Profile Any | Out-Null
     }
 }

@@ -37,14 +37,23 @@ if printf '%s\n' "$INFO" | grep -q '^DANGER'; then
   echo "このフォルダは外部ツールのフォルダでもあります。消すと困るため中止します。"; exit 1
 fi
 
-TMPS=()
+# 作業フォルダ: EncodeTemp などの中の、このツールが作ったもの（<パッケージ>_<番号>）だけを消す。
+# EncodeTemp など自体は、空になったときだけ消す（利用者が同じ名前のフォルダを使っていても中身には触れない）
+PKGS=$(printf '%s\n' "$INFO" | awk -F'\t' '$1=="APP"{print $2}' | paste -sd'|' -)
+TMPP=(); TMPS=()
 for n in EncodeTemp encode_tools $(printf '%s\n' "$INFO" | awk -F'\t' '$1=="TMP"{print $2}'); do
-  for d in "/$n" "${TMPDIR:-/tmp}/$n"; do [ -d "$d" ] && TMPS+=("$d"); done
+  for d in "/$n" "${TMPDIR:-/tmp}/$n"; do [ -d "$d" ] && TMPP+=("$d"); done
+done
+for d in ${TMPP[@]+"${TMPP[@]}"}; do
+  [ -n "$PKGS" ] || break
+  while IFS= read -r x; do TMPS+=("$x"); done < <(find "$d" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended \
+    -regex ".*/\.?($PKGS)(_av1an)?_[0-9a-f]{8,12}" 2>/dev/null)
 done
 DESKS=()
 while IFS=$'\t' read -r K P N; do
   [ "$K" = APP ] || continue
-  f="$HOME_DIR/.local/share/applications/$N.desktop"; [ -f "$f" ] && DESKS+=("$f")
+  # このフォルダを起動するランチャーだけ（同じ名前の別のものは消さない）
+  f="$HOME_DIR/.local/share/applications/$N.desktop"; [ -f "$f" ] && grep -qF "$APP/" "$f" && DESKS+=("$f")
 done <<< "$INFO"
 SVC=0; [ -f "/etc/systemd/system/$WEBSVC.service" ] && SVC=1
 
@@ -62,20 +71,33 @@ if [ $SVC -eq 1 ]; then
   $SUDO rm -f "/etc/systemd/system/$WEBSVC.service"
   $SUDO systemctl daemon-reload || true
 fi
-PORT=8765
-command -v ufw >/dev/null && $SUDO ufw delete allow "$PORT/tcp" >/dev/null 2>&1 || true
-command -v firewall-cmd >/dev/null && { $SUDO firewall-cmd --permanent --remove-port="$PORT/tcp" && $SUDO firewall-cmd --reload; } >/dev/null 2>&1 || true
+# ファイアウォール: インストーラーが足したと記録したものだけを消す
+if [ -f "$APP/tools/firewall_added" ]; then
+  while read -r KIND P; do
+    case "$KIND" in
+      ufw) command -v ufw >/dev/null && $SUDO ufw delete allow "$P/tcp" >/dev/null 2>&1 || true;;
+      firewalld) command -v firewall-cmd >/dev/null && { $SUDO firewall-cmd --permanent --remove-port="$P/tcp" && $SUDO firewall-cmd --reload; } >/dev/null 2>&1 || true;;
+    esac
+  done < "$APP/tools/firewall_added"
+fi
 
 pkill -f "$APP/.venv/bin/python" 2>/dev/null || true
 # av1an のコンテナ（エンコード途中のもの）
 if command -v docker >/dev/null; then
-  ids=$($SUDO docker ps -q --filter ancestor=masterofzen/av1an:master 2>/dev/null || true)
+  # このフォルダが起動したコンテナだけ（目印のラベルで見分ける。利用者自身の av1an のコンテナは止めない）
+  ids=$($SUDO docker ps -q --filter "label=av1an_gui.root=$APP" 2>/dev/null || true)
   [ -n "$ids" ] && $SUDO docker rm -f $ids >/dev/null 2>&1 || true
   [ $DOCKER -eq 1 ] && $SUDO docker rmi masterofzen/av1an:master >/dev/null 2>&1 || true
 fi
 sleep 1
 rm -f ${DESKS[@]+"${DESKS[@]}"}
 [ ${#TMPS[@]} -gt 0 ] && { rm -rf "${TMPS[@]}" 2>/dev/null || $SUDO rm -rf "${TMPS[@]}"; }
+for d in ${TMPP[@]+"${TMPP[@]}"}; do rmdir "$d" 2>/dev/null || true; done     # 空になったときだけ消える
+# 以前の版のインストーラーで uv が ~/.local/bin に置いた python のリンク（このフォルダの Python を指すものだけ）
+for f in "$HOME_DIR"/.local/bin/python*; do
+  [ -L "$f" ] || continue
+  case "$(readlink -f "$f" 2>/dev/null)" in "$APP"/*) rm -f "$f";; esac
+done
 # Docker が root で作ったファイルが残る場合がある
 rm -rf "$APP" 2>/dev/null || $SUDO rm -rf "$APP"
 echo "アンインストール完了"

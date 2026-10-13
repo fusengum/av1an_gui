@@ -77,19 +77,26 @@ fi
 # 4. uv と Python
 #    uv はこのフォルダ内 → PATH の順に探し、無ければこのフォルダ内に取得する
 #    Python は既存の仮想環境が使えればそのまま。無ければ PC の Python（3.12 以上 3.14 未満）を使い、それも無いときだけ取得する
-export UV_PYTHON_INSTALL_DIR="$TOOLS/python" UV_CACHE_DIR="$TOOLS/uv-cache"
+# uv が、このフォルダの外（利用者の環境）に何も残さないようにする:
+#   Python は tools/python だけに置き、~/.local/bin に実行ファイルを置かない。利用者や親フォルダの uv の設定を読まない
+export UV_PYTHON_INSTALL_DIR="$TOOLS/python" UV_CACHE_DIR="$TOOLS/uv-cache" UV_PYTHON_BIN_DIR="$TOOLS/python/bin"
+export UV_PYTHON_INSTALL_BIN=0 UV_PYTHON_INSTALL_REGISTRY=0 UV_NO_CONFIG=1
 PY_MIN=3.12; PY_REQ=">=3.12,<3.14"
 if [ -x "$TOOLS/uv/uv" ]; then UV="$TOOLS/uv/uv"
 elif command -v uv >/dev/null && [ -z "$FORCE" ]; then UV="$(command -v uv)"; echo "uv: $UV（導入済み）"
 else
   step "uv を取得"
   mkdir -p "$TOOLS/uv"
-  curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$TOOLS/uv" UV_NO_MODIFY_PATH=1 sh
+  curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$TOOLS/uv" UV_NO_MODIFY_PATH=1 sh
   UV="$TOOLS/uv/uv"
 fi
 PY="$APP/.venv/bin/python"
 py_ok() { [ -x "$1" ] && "$1" -c 'import sys; sys.exit(0 if (3, 12) <= sys.version_info[:2] < (3, 14) else 1)' 2>/dev/null; }
-new_venv() { rm -rf "$APP/.venv"; "$UV" venv --python "$1" "$APP/.venv"; }
+new_venv() {
+  # .venv がリンクなら作り直さない（リンク先を壊さないため。rm -rf はリンク自体を消すだけだが、念のため止める）
+  if [ -L "$APP/.venv" ]; then echo ".venv がリンクになっています。別の名前に変えてから実行し直してください"; exit 1; fi
+  rm -rf "$APP/.venv"; "$UV" venv --python "$1" "$APP/.venv"
+}
 step "Python を準備"
 if py_ok "$PY" && [ -z "$FORCE" ]; then
   echo "Python $("$PY" -c 'import platform; print(platform.python_version())')（導入済み）"
@@ -165,8 +172,15 @@ WantedBy=multi-user.target
 UNIT
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable --now "$WEBSVC"
-  command -v ufw >/dev/null && $SUDO ufw allow "$PORT/tcp" >/dev/null 2>&1 || true
-  command -v firewall-cmd >/dev/null && { $SUDO firewall-cmd --permanent --add-port="$PORT/tcp" && $SUDO firewall-cmd --reload; } >/dev/null 2>&1 || true
+  # ファイアウォール: 規則がまだ無いときだけ足し、足したことを tools/firewall_added に残す
+  # （アンインストールでは、ここで足したものだけを消す。利用者が自分で足した同じ規則は消さない）
+  FWREC="$TOOLS/firewall_added"
+  if command -v ufw >/dev/null && ! $SUDO ufw show added 2>/dev/null | grep -qx "ufw allow $PORT/tcp"; then
+    $SUDO ufw allow "$PORT/tcp" >/dev/null 2>&1 && echo "ufw $PORT" >> "$FWREC" || true
+  fi
+  if command -v firewall-cmd >/dev/null && ! $SUDO firewall-cmd --permanent --query-port="$PORT/tcp" >/dev/null 2>&1; then
+    { $SUDO firewall-cmd --permanent --add-port="$PORT/tcp" && $SUDO firewall-cmd --reload; } >/dev/null 2>&1 && echo "firewalld $PORT" >> "$FWREC" || true
+  fi
   IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   printf '\033[32mWeb 画面: http://%s:%s\033[0m\n' "$IP" "$PORT"
 fi
