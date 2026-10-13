@@ -19,6 +19,7 @@ Windows / Linux 対応。素の VM から Python 不要で全自動セットア�
   - `core/av1an.py`: av1an・エンコーダの検出と導入（Windows は MSYS2 ucrt64 の依存閉包、Linux は Docker `masterofzen/av1an:master`）、並列数計算（`WORKER_COST` / `auto_workers` / `plan_workers` / `resolve_workers`）
   - `gui/worker_assist.py`: 並列数アシスト
   - `web/`: FastAPI + データ駆動の `static/index.html`。各アプリの `webapp.py` の `make()` が WebApp を返す
+  - キューを持つのは Web サーバーだけ。デスクトップ版は `web/client.py` でサーバーにジョブを送り、`/api/state` を見て表示する（サーバーは `logs/web.json` にポートを書く。無ければデスクトップ版が起動する）
 - `av1gui/`: アプリ本体（`app.json`、`env.py`、`webapp.py`、`config.py`、`encode.py`、`encoders.py`、`gui/`）
 - インストーラー: `install.bat` → `install_gui.ps1`（WinForms）→ `install.ps1 -Gui` → `python -m shared setup --progress`。進捗行は `@@STEP id state label` / `@@PROG frac msg` / `@@INFO` / `@@DONE` / `@@FAIL`
 - Linux: `install.sh`（systemd の Web サービス、ランチャー）

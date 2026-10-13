@@ -96,7 +96,8 @@ dialog::backdrop{background:#0008}
   <div class="card">
     <div class="row" style="justify-content:space-between">
       <h2 style="margin:0">ジョブ（上から順に 1 件ずつ処理）</h2>
-      <button class="b" onclick="api('/api/jobs/clear',{method:'POST'}).then(refresh)">終わったものを消去</button>
+      <div><button class="d" id="stopall" style="display:none" onclick="if(confirm('待機中と処理中のジョブをすべて中止します。途中までの分は残り、再実行すると続きから再開します。'))api('/api/jobs/stop',{method:'POST'}).then(refresh)">すべて中止</button>
+      <button class="b" onclick="api('/api/jobs/clear',{method:'POST'}).then(refresh)">終わったものを消去</button></div>
     </div>
     <table><thead><tr><th>ファイル</th><th>ツール</th><th>内容</th><th style="width:22%">進捗</th><th>状態</th><th></th></tr></thead>
     <tbody id="jobs"></tbody></table>
@@ -166,6 +167,7 @@ const ST={queued:'待機',running:'処理中',done:'完了',failed:'失敗',canc
 async function refresh(){
   let s;try{s=await api('/api/state')}catch(e){return}
   const tb=$('jobs');$('nojobs').style.display=s.jobs.length?'none':'';
+  $('stopall').style.display=s.jobs.some(j=>['queued','running'].includes(j.state))?'':'none';
   tb.innerHTML=s.jobs.map(j=>`<tr>
     <td title="${esc(j.path)}">${esc(j.name)}${j.output?`<div class="small muted" title="${esc(j.output)}">→ ${esc(j.output.split(/[\\/]/).pop())}</div>`:''}</td>
     <td><img src="/icon/${j.kind}" width="18" style="vertical-align:middle"> ${esc(APPS[j.kind]?.name||j.kind)}</td>

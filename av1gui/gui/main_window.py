@@ -1,11 +1,13 @@
-"""av1an_gui メインウィンドウ"""
+"""av1an_gui メインウィンドウ
+キュー・進捗は Web 画面のサーバーが持つ（shared.web.client）。この画面で追加した行は「エンコード開始」で
+サーバーのキューに送られ、Web 画面から追加したものも含めて同じキューを表示する。"""
 from __future__ import annotations
 
-import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
                                QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
@@ -15,13 +17,13 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
 from shared.core import av1an as A
 from shared.core import probe as P
 from shared.core import tools
-from shared.core.runner import Cancelled
 from shared.gui.settings_dialog import SettingsDialog
+from shared.web.client import Client, ServerError
 
 from .. import APP_NAME, __version__
 from .. import encoders as E
 from ..config import AvSettings
-from ..encode import AUDIO_LABELS, CHUNK_LABELS, CROP_LABELS, RES_LABELS, SC_LABELS, AvJob, AvPipeline, describe_plan
+from ..encode import AUDIO_LABELS, CHUNK_LABELS, CROP_LABELS, RES_LABELS, SC_LABELS, AvJob, describe_plan
 from ..env import TOOL_LIST
 from .help import TIPS
 
@@ -30,6 +32,10 @@ COL_FILE, COL_VINFO, COL_CONTENT, COL_RES, COL_CROP, COL_AUDIO, COL_STATUS, COL_
 PER_ROW = ("content", "res", "crop", "audio")
 ST_PROBING, ST_READY, ST_ERROR, ST_RUNNING, ST_DONE, ST_FAILED, ST_CANCELLED = (
     "解析中…", "待機", "対象外", "処理中", "完了", "失敗", "中止")
+ST_QUEUED = "queued"                     # サーバーのキューで順番待ち
+SERVER_ST = {"queued": ST_QUEUED, "running": ST_RUNNING, "done": ST_DONE, "failed": ST_FAILED,
+             "cancelled": ST_CANCELLED}
+KIND = __name__.split(".")[0]            # サーバーでのツール名（パッケージ名）
 
 
 @dataclass
@@ -40,53 +46,50 @@ class Row:
     error: str = ""
     output: Path | None = None
     w: dict = field(default_factory=dict)
+    jid: str | None = None               # サーバーのジョブ ID（キューに送った後）
+    sent: float = 0.0                    # キューに送った時刻（それより前に取った状態では上書きしない）
 
 
 class ProbeSig(QObject):
-    done = Signal(object, object, str)
+    done = Signal(int, object, str)
 
 
 class ProbeTask(QRunnable):
-    def __init__(self, path, ffprobe, sig):
+    def __init__(self, rid, path, ffprobe, sig):
         super().__init__()
-        self.path, self.ffprobe, self.sig = path, ffprobe, sig
+        self.rid, self.path, self.ffprobe, self.sig = rid, path, ffprobe, sig
 
     def run(self):
         try:
-            self.sig.done.emit(self.path, P.probe(self.path, self.ffprobe), "")
+            self.sig.done.emit(self.rid, P.probe(self.path, self.ffprobe), "")
         except Exception as e:  # noqa: BLE001
-            self.sig.done.emit(self.path, None, str(e))
+            self.sig.done.emit(self.rid, None, str(e))
 
 
-class Worker(QObject):
-    log = Signal(str)
-    prog = Signal(int, str, float)
-    state = Signal(int, str, str, str)
-    finished = Signal()
+class PollSig(QObject):
+    done = Signal(object, object, str, float)     # 状態, {jid: (ログ行, 次の位置)}, エラー, 問い合わせた時刻
 
-    def __init__(self, s: AvSettings, jobs):
+
+class PollTask(QRunnable):
+    """サーバーのキューとログを取ってくる（画面を止めないよう別スレッドで）"""
+    def __init__(self, client: Client, log_pos: dict, sig: PollSig):
         super().__init__()
-        self.s, self.jobs = s, jobs
-        self.cancel = threading.Event()
+        self.client, self.log_pos, self.sig = client, log_pos, sig
 
-    @Slot()
     def run(self):
-        for rid, job, info in self.jobs:
-            if self.cancel.is_set():
-                self.state.emit(rid, ST_CANCELLED, "", "")
-                continue
-            self.state.emit(rid, ST_RUNNING, "", "")
-            try:
-                r = AvPipeline(self.s, self.log.emit, lambda l, f, rid=rid: self.prog.emit(rid, l, f),
-                               self.cancel).run(job, info)
-                self.state.emit(rid, ST_DONE, "", str(r.output))
-            except Cancelled:
-                self.log.emit("中止しました")
-                self.state.emit(rid, ST_CANCELLED, "", "")
-            except Exception as e:  # noqa: BLE001
-                self.log.emit(f"エラー: {e}")
-                self.state.emit(rid, ST_FAILED, str(e), "")
-        self.finished.emit()
+        t = time.time()
+        try:
+            self.client.ensure()
+            st = self.client.state()
+            logs = {}
+            for j in st["jobs"]:
+                pos = self.log_pos.get(j["id"])
+                if j["kind"] == KIND and pos is not None and j["log_lines"] > pos:
+                    r = self.client.log(j["id"], pos)
+                    logs[j["id"]] = (r["lines"], r["next"])
+            self.sig.done.emit(st, logs, "", t)
+        except Exception as e:  # noqa: BLE001
+            self.sig.done.emit(None, {}, str(e), t)
 
 
 def combo(labels: dict, current=None) -> QComboBox:
@@ -110,8 +113,13 @@ class AvMainWindow(QMainWindow):
         self.pool = QThreadPool.globalInstance()
         self.psig = ProbeSig()
         self.psig.done.connect(self._on_probed)
-        self.thread = None
-        self.worker = None
+        self.client = Client()
+        self.log_pos: dict[str, int] = {}
+        self._inst = None
+        self._polling = False
+        self._stopping = False
+        self.qsig = PollSig()
+        self.qsig.done.connect(self._on_poll)
         self._cur_enc = self.s.encoder
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1360, 900)
@@ -124,6 +132,10 @@ class AvMainWindow(QMainWindow):
                 self.restoreGeometry(bytes.fromhex(self.s.window_geometry))
             except ValueError:
                 pass
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._poll)
+        self.timer.start(1000)
+        self._poll()
 
     # ---------------------------------------------------------------- UI
     def _lbl(self, text, key):
@@ -146,6 +158,12 @@ class AvMainWindow(QMainWindow):
         head.addWidget(t)
         head.addWidget(sub)
         head.addStretch(1)
+        self.srv_chip = QLabel("キュー: 接続中…")
+        self.srv_chip.setObjectName("muted")
+        self.srv_chip.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.srv_chip.setOpenExternalLinks(True)
+        head.addWidget(self.srv_chip)
+        head.addSpacing(8)
         self.env_chip = QLabel()
         head.addWidget(self.env_chip)
         b = QPushButton("環境設定")
@@ -634,10 +652,10 @@ class AvMainWindow(QMainWindow):
                 self._add_row(f)
         self._hint()
 
-    def _add_row(self, path):
+    def _add_row(self, path, jid=None, options=None) -> int:
         rid = self._next
         self._next += 1
-        row = Row(path)
+        row = Row(path, jid=jid)
         self.rows[rid] = row
         r = self.table.rowCount()
         self.table.insertRow(r)
@@ -654,7 +672,7 @@ class AvMainWindow(QMainWindow):
         row.w = {"vinfo": vinfo, "status": st, "prog": pb}
         cols = {"content": COL_CONTENT, "res": COL_RES, "crop": COL_CROP, "audio": COL_AUDIO}
         for k in PER_ROW:
-            cb = combo(ROW_LABELS[k], self.defaults[k].currentData())
+            cb = combo(ROW_LABELS[k], (options or {}).get(k, self.defaults[k].currentData()))
             cb.setToolTip(TIPS[k])
             cb.currentIndexChanged.connect(lambda _=0, rid=rid: self._update(rid))
             row.w[k] = cb
@@ -662,21 +680,32 @@ class AvMainWindow(QMainWindow):
         for col, wdg in ((COL_VINFO, vinfo), (COL_STATUS, st), (COL_PROG, pb)):
             self.table.setCellWidget(r, col, wdg)
         self._probe(rid)
+        return rid
 
     def _probe(self, rid):
         ffprobe = tools.find_tool("ffprobe", self.s)
-        if not ffprobe:
-            self._set(rid, ST_ERROR, "ffprobe がありません（環境設定でセットアップしてください）")
-            return
-        self._set(rid, ST_PROBING)
-        self.pool.start(ProbeTask(self.rows[rid].path, ffprobe, self.psig))
-
-    @Slot(object, object, str)
-    def _on_probed(self, path, info, err):
-        rid = next((k for k, r in self.rows.items() if r.path == path), None)
-        if rid is None:
-            return
         row = self.rows[rid]
+        if not ffprobe:
+            if not row.jid:
+                self._set(rid, ST_ERROR, "ffprobe がありません（環境設定でセットアップしてください）")
+            return
+        if not row.jid:
+            self._set(rid, ST_PROBING)
+        self.pool.start(ProbeTask(rid, row.path, ffprobe, self.psig))
+
+    @Slot(int, object, str)
+    def _on_probed(self, rid, info, err):
+        row = self.rows.get(rid)
+        if row is None:
+            return
+        if row.jid:                       # キューにあるもの: 映像の説明だけ（状態はサーバーに従う）
+            row.info = info
+            if info and info.video:
+                row.w["vinfo"].setText(info.video.describe())
+                row.w["vinfo"].setToolTip(info.video.detail())
+            else:
+                row.w["vinfo"].setText("—")
+            return
         if err or info is None:
             self._set(rid, ST_ERROR, err.splitlines()[-1] if err else "解析失敗")
             return
@@ -717,7 +746,8 @@ class AvMainWindow(QMainWindow):
         col = {ST_DONE: "#8de0a6", ST_FAILED: "#ff8a95", ST_ERROR: "#c8a96a", ST_RUNNING: "#9cc0ff",
                ST_CANCELLED: "#c8a96a"}.get(state, "#c9ced8")
         st.setStyleSheet(f"color: {col};")
-        st.setText(state + (f": {msg}" if msg and state in (ST_ERROR, ST_FAILED) else ""))
+        text = "待機（順番待ち）" if state == ST_QUEUED else state
+        st.setText(text + (f": {msg}" if msg and state in (ST_ERROR, ST_FAILED) else ""))
         st.setToolTip(msg or (str(row.output) if row.output else ""))
         if state == ST_DONE:
             row.w["prog"].setValue(1000)
@@ -728,17 +758,31 @@ class AvMainWindow(QMainWindow):
     def _ids_sel(self):
         return [self.table.item(r, COL_FILE).data(Qt.UserRole) for r in sorted({i.row() for i in self.table.selectedIndexes()})]
 
-    def _remove_ids(self, ids):
+    def _drop_rows(self, ids):
         for rid in ids:
-            if self.rows[rid].state in (ST_RUNNING, "queued"):
-                continue
             for r in range(self.table.rowCount()):
                 if self.table.item(r, COL_FILE).data(Qt.UserRole) == rid:
                     self.table.removeRow(r)
                     break
-            del self.rows[rid]
+            self.rows.pop(rid, None)
         self._hint()
         self._update_auto()
+
+    def _remove_ids(self, ids):
+        """表から消す。キューに送ったものはサーバーからも消す（Web 画面からも消える）。処理中のものは消さない"""
+        drop = []
+        for rid in ids:
+            row = self.rows[rid]
+            if row.state == ST_RUNNING:
+                continue
+            if row.jid:
+                try:
+                    self.client.remove(row.jid)
+                except ServerError as e:
+                    self.cur.setText(str(e))
+                    continue
+            drop.append(rid)
+        self._drop_rows(drop)
 
     def _remove_sel(self):
         self._remove_ids(self._ids_sel())
@@ -753,7 +797,10 @@ class AvMainWindow(QMainWindow):
                 if w[k].isEnabled():
                     w[k].setCurrentIndex(max(0, w[k].findData(self.bulk[k].currentData())))
 
-    # ---------------------------------------------------------------- 実行
+    # ---------------------------------------------------------------- 実行（サーバーのキュー）
+    def _opts(self, row) -> dict:
+        return {k: row.w[k].currentData() for k in PER_ROW}
+
     def _start(self):
         self._save()
         if not self._refresh_env():
@@ -767,89 +814,145 @@ class AvMainWindow(QMainWindow):
         if self.rb_custom.isChecked() and not self.out_edit.text().strip():
             QMessageBox.warning(self, APP_NAME, "保存先フォルダを指定してください。")
             return
-        jobs = []
+        targets = []
         for r in range(self.table.rowCount()):
             rid = self.table.item(r, COL_FILE).data(Qt.UserRole)
             row = self.rows[rid]
-            if row.state != ST_READY or not row.info:
-                continue
-            jobs.append((rid, self._job(row), row.info))
-            row.w["prog"].setValue(0)
-        if not jobs:
+            if (not row.jid and row.state == ST_READY and row.info) or \
+                    (row.jid and row.state in (ST_FAILED, ST_CANCELLED)):
+                targets.append(rid)
+        if not targets:
             QMessageBox.information(self, APP_NAME, "エンコード待ちのファイルがありません。")
             return
-        self._ids = [j[0] for j in jobs]
-        self._done = 0
-        self.total.setValue(0)
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
-        for rid in self._ids:
-            self.rows[rid].state = "queued"
-            for k in PER_ROW:
-                self.rows[rid].w[k].setEnabled(False)
-        self.thread = QThread(self)
-        self.worker = Worker(self.s, jobs)
-        self.worker.moveToThread(self.thread)
-        self.thread.started.connect(self.worker.run)
-        self.worker.log.connect(self.logw.appendPlainText)
-        self.worker.prog.connect(self._on_prog)
-        self.worker.state.connect(self._on_state)
-        self.worker.finished.connect(self._on_finished)
-        self.thread.start()
+        try:
+            self.client.ensure()
+        except ServerError as e:
+            QMessageBox.warning(self, APP_NAME, f"キューを受け持つ Web サーバーに接続できません。\n{e}")
+            return
+        for rid in targets:
+            row = self.rows[rid]
+            try:
+                if row.jid:                       # 失敗・中止したもの: 今の選択肢でやり直す
+                    self.client.retry(row.jid, self._opts(row))
+                else:
+                    row.jid = self.client.add(KIND, row.path, self._opts(row))
+                    self.log_pos[row.jid] = 0
+            except ServerError as e:
+                QMessageBox.warning(self, APP_NAME, f"{row.path.name} をキューに追加できません。\n{e}")
+                break
+            row.sent = time.time()
+            row.w["prog"].setValue(0)
+            self._set(rid, ST_QUEUED)
+        self._stopping = False
+        self._poll()
 
     def _stop(self):
-        if self.worker:
-            self.worker.cancel.set()
-            self.btn_stop.setEnabled(False)
-            self.cur.setText("停止中…（途中までの分は残ります。もう一度開始すると続きから再開します）")
-
-    @Slot(int, str, float)
-    def _on_prog(self, rid, label, f):
-        row = self.rows.get(rid)
-        if not row:
+        try:
+            self.client.stop_all()
+        except ServerError as e:
+            QMessageBox.warning(self, APP_NAME, str(e))
             return
-        row.w["prog"].setValue(int(f * 1000))
-        row.w["status"].setText(f"処理中: {label}")
-        n = len(self._ids)
-        self.total.setValue(int((self._done + f) / n * 1000))
-        self.cur.setText(f"{self._done + 1}/{n}  {row.path.name} — {label}")
-
-    @Slot(int, str, str, str)
-    def _on_state(self, rid, state, msg, output):
-        if state in (ST_DONE, ST_FAILED, ST_CANCELLED):
-            self._done += 1
-        self._set(rid, state, msg, output)
-
-    @Slot()
-    def _on_finished(self):
-        self.thread.quit()
-        self.thread.wait()
-        self.thread = self.worker = None
-        self.btn_start.setEnabled(True)
+        self._stopping = True
         self.btn_stop.setEnabled(False)
-        ok = sum(1 for i in self._ids if self.rows.get(i) and self.rows[i].state == ST_DONE)
-        ng = sum(1 for i in self._ids if self.rows.get(i) and self.rows[i].state == ST_FAILED)
-        self.cur.setText(f"終了: 成功 {ok} / 失敗 {ng} / 全 {len(self._ids)}")
-        if not ng:
-            self.total.setValue(1000)
-        for rid in self._ids:
-            row = self.rows.get(rid)
-            if row and row.state in (ST_CANCELLED, ST_FAILED, "queued"):
-                st, err = row.state, row.error
-                row.state = ST_READY
-                self._update(rid)
-                if st != "queued":
-                    row.w["status"].setText(st + (f": {err}" if err else ""))
-                    row.w["status"].setToolTip(err)
+        self.cur.setText("停止中…（途中までの分は残ります。もう一度開始すると続きから再開します）")
+
+    def _poll(self):
+        if self._polling:
+            return
+        self._polling = True
+        self.pool.start(PollTask(self.client, dict(self.log_pos), self.qsig))
+
+    @Slot(object, object, str, float)
+    def _on_poll(self, st, logs, err, t):
+        self._polling = False
+        if st is None:
+            self.srv_chip.setText("キュー: Web サーバーに接続できません")
+            self.srv_chip.setToolTip(err)
+            self.btn_stop.setEnabled(False)
+            return
+        url = self.client.base
+        self.srv_chip.setText(f'キュー: <a href="{url}/" style="color:#9cc0ff">{url.split("//")[-1]}</a>')
+        self.srv_chip.setToolTip("Web 画面と同じキューです")
+        if self._inst and st.get("instance") != self._inst:
+            # サーバーが再起動してキューが消えた: 送ったものは開始前に戻す
+            for rid, row in list(self.rows.items()):
+                if row.jid:
+                    row.jid = None
+                    if row.state in (ST_QUEUED, ST_RUNNING) and row.info:
+                        row.state = ST_READY
+                        self._update(rid)
+            self.log_pos.clear()
+        self._inst = st.get("instance")
+        jobs = [j for j in st["jobs"] if j["kind"] == KIND]
+        byid = {j["id"]: j for j in jobs}
+        by_jid = {r.jid: rid for rid, r in self.rows.items() if r.jid}
+        # Web 画面などで消されたものは、この表からも消す
+        self._drop_rows([rid for jid, rid in by_jid.items() if jid not in byid and self.rows[rid].sent < t])
+        for j in jobs:
+            rid = by_jid.get(j["id"])
+            if rid is None:                       # Web 画面から追加されたもの
+                rid = self._add_row(Path(j["path"]), jid=j["id"], options=j["options"])
+                self.log_pos[j["id"]] = max(0, j["log_lines"] - 200) if j["state"] == "running" else j["log_lines"]
+            elif self.rows[rid].sent >= t:
+                continue                          # 送る前に取った状態
+            self._show_job(rid, j)
+        for jid, (lines, nxt) in logs.items():
+            if lines:
+                self.logw.appendPlainText("\n".join(lines))
+            self.log_pos[jid] = nxt
+        self._summary(jobs)
+        self._hint()
+
+    def _show_job(self, rid, j):
+        row = self.rows[rid]
+        state = SERVER_ST.get(j["state"], ST_FAILED)
+        self._set(rid, state, j.get("error", ""), j.get("output", ""))
+        if state == ST_RUNNING:
+            row.w["status"].setText(f"処理中: {j['label']}")
+            row.w["status"].setToolTip(j["label"])
+        if state != ST_DONE:
+            row.w["prog"].setValue(int(j["progress"] * 1000))
+
+    def _summary(self, jobs):
+        active = [j for j in jobs if j["state"] in ("queued", "running")]
+        run = next((j for j in jobs if j["state"] == "running"), None)
+        n = len(jobs)
+        fin = sum(1 for j in jobs if j["state"] in ("done", "failed", "cancelled"))
+        if not active:
+            self._stopping = False
+        self.btn_stop.setEnabled(bool(active) and not self._stopping)
+        self.total.setValue(int((fin + (run["progress"] if run else 0)) / n * 1000) if n else 0)
+        if self._stopping:
+            return
+        if run:
+            self.cur.setText(f"{jobs.index(run) + 1}/{n}  {Path(run['path']).name} — {run['label']}")
+        elif active:
+            self.cur.setText("順番待ち…")
+        elif n:
+            ok = sum(1 for j in jobs if j["state"] == "done")
+            ng = sum(1 for j in jobs if j["state"] == "failed")
+            self.cur.setText(f"終了: 成功 {ok} / 失敗 {ng} / 全 {n}")
+        else:
+            self.cur.setText("")
 
     def closeEvent(self, e):
-        if self.thread:
-            if QMessageBox.question(self, APP_NAME, "エンコード中です。中止して終了しますか？\n（途中までの分は残り、次回続きから再開できます）") != QMessageBox.Yes:
+        if any(r.jid and r.state in (ST_QUEUED, ST_RUNNING) for r in self.rows.values()):
+            box = QMessageBox(QMessageBox.Question, APP_NAME,
+                              "エンコードはこの画面を閉じても裏で続きます（Web 画面でも確認できます）。\n"
+                              "中止する場合も、途中までの分は残り、次回続きから再開できます。", parent=self)
+            keep = box.addButton("閉じる（続ける）", QMessageBox.AcceptRole)
+            stop = box.addButton("中止して閉じる", QMessageBox.DestructiveRole)
+            box.addButton("キャンセル", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is stop:
+                try:
+                    self.client.stop_all()
+                except ServerError:
+                    pass
+            elif box.clickedButton() is not keep:
                 e.ignore()
                 return
-            self.worker.cancel.set()
-            self.thread.quit()
-            self.thread.wait(10000)
+        self.timer.stop()
         self._save()
         self.s.window_geometry = bytes(self.saveGeometry()).hex()
         self.s.save()

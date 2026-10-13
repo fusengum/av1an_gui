@@ -23,6 +23,9 @@ def main() -> int:
         sys.stderr = sys.stderr or f
 
     print(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} Web 画面を起動します: http://{a.host}:{a.port}/", flush=True)
+    # デスクトップ版がこのサーバーを見つけるための目印（ポートはインストール時に変えられるため）
+    from shared.web.client import write_info
+    write_info(a.host, a.port)
     try:
         import uvicorn
         uvicorn.run("shared.web.server:app", host=a.host, port=a.port, log_level="warning", use_colors=False)

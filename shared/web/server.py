@@ -1,4 +1,5 @@
 """Web 画面のサーバー（FastAPI）。このフォルダに入っているツールのジョブをキューで順番に処理する。
+キューを持つのはこのサーバーだけで、デスクトップ版もここにジョブを送って進捗を受け取る（shared.web.client）。
 認証は無し（LAN 内での利用を想定）。"""
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from shared import app_name, apps, tool_list
 from shared.settings import tool_settings
 from shared.core import probe as P
 from shared.core import tools
-from shared.core.config import IS_WIN
+from shared.core.config import APP_ROOT, IS_WIN
 from shared.core.runner import Cancelled
 
 from .apps import load_apps
@@ -28,7 +29,8 @@ STATIC = Path(__file__).parent / "static"
 MEDIA_EXTS = {".mkv", ".mka", ".mp4", ".m4v", ".mov", ".m2ts", ".mts", ".ts", ".hevc", ".h264", ".264", ".ivf",
               ".wav", ".flac", ".webm", ".avi", ".y4m"}
 HIDDEN_SETTINGS = {"window_geometry", "recent_dir"}
-VERSION = "0.2.0"
+VERSION = "0.3.0"
+INSTANCE = uuid.uuid4().hex[:12]       # 起動ごとに変わる（デスクトップ版がサーバーの再起動を見分ける）
 
 
 # ------------------------------------------------------------------ ジョブ
@@ -104,6 +106,9 @@ class JobQueue:
             self._run(j)
 
     def _run(self, j: WebJob):
+        if j.cancel.is_set():                 # 取り出した直後に中止された
+            j.state, j.label = "cancelled", "中止"
+            return
         j.state, j.started, j.label = "running", time.time(), "開始"
 
         def log(m: str):
@@ -212,7 +217,7 @@ def icon(name: str):
 def meta():
     title, sub = _title()
     return {
-        "version": VERSION, "title": title, "subtitle": sub,
+        "version": VERSION, "title": title, "subtitle": sub, "root": str(APP_ROOT), "instance": INSTANCE,
         "apps": [{"id": a.id, "name": a.name, "desc": a.desc, "job_fields": a.job_fields,
                   "job_defaults": (a.job_defaults() if a.job_defaults else {}), "assist": bool(a.assist_encoders),
                   "settings_fields": a.settings_fields, "settings_note": a.settings_note, "tips": a.tips,
@@ -222,7 +227,7 @@ def meta():
 
 @app.get("/api/state")
 def state():
-    return {"jobs": [j.summary() for j in Q.list()],
+    return {"instance": INSTANCE, "jobs": [j.summary() for j in Q.list()],
             "env": {"running": ENV.running, "message": ENV.message, "progress": ENV.progress, "error": ENV.error}}
 
 
@@ -265,13 +270,34 @@ def cancel(jid: str):
     return {"ok": True}
 
 
+class RetryReq(BaseModel):
+    options: dict | None = None        # 指定すればファイルごとの選択肢を変えてやり直す
+
+
 @app.post("/api/jobs/{jid}/retry")
-def retry(jid: str):
+def retry(jid: str, req: RetryReq | None = None):
     j = Q.jobs.get(jid)
     if not j or j.state in ("running", "queued"):
         raise HTTPException(400)
+    if req and req.options is not None:
+        j.options = dict(req.options)
     j.state, j.progress, j.label, j.error, j.cancel = "queued", 0.0, "待機", "", threading.Event()
+    j.output, j.started, j.finished = "", 0.0, 0.0
     Q.wake.set()
+    return {"ok": True}
+
+
+@app.post("/api/jobs/stop")
+def stop_all():
+    """待機中をすべて中止してから、処理中のものを止める（先に止めると次の待機が始まってしまう）"""
+    jobs = Q.list()
+    for j in jobs:
+        if j.state == "queued":
+            j.state, j.label = "cancelled", "中止"
+            j.cancel.set()
+    for j in jobs:
+        if j.state == "running":
+            j.cancel.set()
     return {"ok": True}
 
 
