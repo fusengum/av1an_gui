@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -213,7 +214,7 @@ class Client:
         return self.get(f"/api/jobs/{urllib.parse.quote(jid)}/log?since={since}")
 
 
-# ------------------------------------------------------------------ 以前の版のサーバーを止める
+# ------------------------------------------------------------------ このフォルダのプロセスを探す・止める
 
 def _same_dir(path: str) -> bool:
     try:
@@ -222,43 +223,94 @@ def _same_dir(path: str) -> bool:
         return False
 
 
-def server_pids() -> list[int]:
-    """このフォルダの Web サーバー（python -m shared.web）のプロセス。このプロセス自身は含めない"""
-    pids = set()
-    me = os.getpid()
-    root = str(APP_ROOT).lower()
+def _under_root(path: str) -> bool:
+    try:
+        return APP_ROOT in Path(path).resolve().parents
+    except (OSError, ValueError):
+        return False
+
+
+def _procs() -> list[tuple[int, int, str, str]]:
+    """python のプロセスの (pid, 親の pid, 実行ファイル, コマンドライン)"""
+    out = []
     if IS_WIN:
-        ps = ("Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%shared.web%'\" | "
-              "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+        ps = ("Get-CimInstance Win32_Process -Filter \"Name LIKE 'python%'\" | ForEach-Object "
+              "{ \"$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.ExecutablePath)`t$($_.CommandLine)\" }")
         r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
-                           timeout=30, creationflags=0x08000000)
+                           encoding="utf-8", errors="replace", timeout=30, creationflags=0x08000000)
         for line in r.stdout.splitlines():
-            n, _, cmd = line.partition("\t")
-            # venv の python とその子（uv で入れた本体）は、どちらもこのフォルダの中にある
-            if n.strip().isdigit() and "-m shared.web" in cmd and root in cmd.lower():
-                pids.add(int(n))
-    else:
-        for e in os.listdir("/proc"):
-            if not e.isdigit():
-                continue
-            try:
-                cmd = Path(f"/proc/{e}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-                if "-m shared.web" in cmd and _same_dir(os.readlink(f"/proc/{e}/cwd")):
-                    pids.add(int(e))
-            except OSError:
-                continue
-    pids.discard(me)
-    return sorted(pids)
+            f = line.split("\t", 3)
+            if len(f) == 4 and f[0].isdigit() and f[1].isdigit():
+                out.append((int(f[0]), int(f[1]), f[2], f[3]))
+        return out
+    for e in os.listdir("/proc"):
+        if not e.isdigit():
+            continue
+        try:
+            cmd = Path(f"/proc/{e}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            ppid = int(Path(f"/proc/{e}/stat").read_text().rsplit(")", 1)[1].split()[1])
+            cwd = os.readlink(f"/proc/{e}/cwd")
+        except (OSError, ValueError, IndexError):
+            continue
+        if "python" in cmd:
+            out.append((int(e), ppid, cwd, cmd))
+    return out
 
 
-def kill_servers() -> list[int]:
-    pids = server_pids()
+def find_procs(modules: list[str]) -> list[int]:
+    """このフォルダで python -m <module> として動いているプロセスと、その子孫（venv の python は本体を子として
+    起動するため）。このプロセス自身と、自分を起動した venv の python（同じ -m のもの）は含めない。
+    更新用のプロセスはサーバーや GUI の子孫として動くことがあり、venv の python を止めると、その子の本体
+    （自分）も止まるため。サーバーなど別のものは親でも含める（1 つずつ止めるので、親を止めても自分は止まらない）"""
+    procs = _procs()
+    parent = {pid: ppid for pid, ppid, _, _ in procs}
+    cmdline = {pid: cmd for pid, _, _, cmd in procs}
+
+    def module(cmd: str) -> str:
+        m = re.search(r"-m\s+(\S+)", cmd or "")
+        return m.group(1) if m else ""
+    me = os.getpid()
+    keep, mine = {me}, module(cmdline.get(me, ""))
+    cur = parent.get(me, 0)
+    while mine and cur and cur not in keep and module(cmdline.get(cur, "")) == mine:
+        keep.add(cur)                            # 自分を起動した venv の python
+        cur = parent.get(cur, 0)
+    roots = set()
+    for pid, _ppid, where, cmd in procs:
+        if not any(f"-m {m}" in cmd for m in modules):
+            continue
+        # Windows: 実行ファイル（.venv や tools の python）がこのフォルダの中か、コマンドラインにフォルダが入っている
+        # Linux: 作業フォルダがこのフォルダ
+        mine = (_under_root(where) or str(APP_ROOT).lower() in cmd.lower()) if IS_WIN else _same_dir(where)
+        if mine:
+            roots.add(pid)
+    found, todo = set(), list(roots)
+    while todo:
+        n = todo.pop()
+        if n in found or n in keep:
+            continue
+        found.add(n)
+        todo += [pid for pid, ppid, _, _ in procs if ppid == n]
+    return sorted(found)
+
+
+def kill_procs(pids: list[int]) -> None:
     for n in pids:
         try:
             if IS_WIN:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(n)], capture_output=True, creationflags=0x08000000)
+                subprocess.run(["taskkill", "/F", "/PID", str(n)], capture_output=True, creationflags=0x08000000)
             else:
                 os.kill(n, 9)                     # systemd のサービスなら、異常終了として起動し直される
         except OSError:
             pass
+
+
+def server_pids() -> list[int]:
+    """このフォルダの Web サーバー（python -m shared.web）のプロセス"""
+    return find_procs(["shared.web"])
+
+
+def kill_servers() -> list[int]:
+    pids = server_pids()
+    kill_procs(pids)
     return pids

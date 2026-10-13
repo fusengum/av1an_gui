@@ -28,6 +28,8 @@ Windows / Linux 対応。素の VM から Python 不要で全自動セットア�
 - インストーラー: `install.bat` → `install_gui.ps1`（WinForms）→ `install.ps1 -Gui` → `python -m shared setup --progress`。進捗行は `@@STEP id state label` / `@@PROG frac msg` / `@@INFO` / `@@DONE` / `@@FAIL`
 - Linux: `install.sh`（systemd の Web サービス、ランチャー）
 
+- 更新: `shared/update.py`（GitHub のリリース → `logs/update/new` に展開 → 切り離した更新用のプロセスがサーバーと GUI を止めて入れ替え、失敗したら戻す）。版は直下の `VERSION`、更新元は `app.json` の `update.github`。更新用のプロセスは PySide6 / FastAPI を読まないこと（DLL を入れ替えられなくなる）
+
 ## 確認
 - `python -m py_compile` を全 .py に
 - `.ps1` は BOM の有無と構文（pwsh の `[System.Management.Automation.Language.Parser]::ParseFile`）

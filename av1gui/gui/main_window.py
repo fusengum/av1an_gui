@@ -12,8 +12,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
-                               QGroupBox, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+                               QGridLayout, QGroupBox, QHBoxLayout, QProgressDialog,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
                                QProgressBar, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QToolButton, QVBoxLayout, QWidget)
@@ -23,7 +23,8 @@ from shared.core import power
 from shared.core import probe as P
 from shared.core import tools
 from shared.gui.settings_dialog import SettingsDialog
-from shared.version import code_fingerprint
+from shared import update as U
+from shared.version import app_version, code_fingerprint
 from shared.web.client import Client, ServerError
 
 from .. import APP_NAME, __version__
@@ -163,6 +164,14 @@ class AvMainWindow(QMainWindow):
         self.timer.timeout.connect(self._poll)
         self.timer.start(1000)
         self._poll()
+        self.usig = PollSig()
+        self.usig.done.connect(self._on_update_info)
+        self._upd = {}
+        self.utimer = QTimer(self)
+        self.utimer.timeout.connect(lambda: self._check_update(False))
+        self.utimer.start(3600 * 1000)
+        QTimer.singleShot(3000, lambda: self._check_update(False))
+        QTimer.singleShot(500, self._show_last_update)
 
     # ---------------------------------------------------------------- UI
     def _lbl(self, text, key):
@@ -187,6 +196,12 @@ class AvMainWindow(QMainWindow):
         head.addWidget(t)
         head.addWidget(sub)
         head.addStretch(1)
+        self.upd_btn = QPushButton("")
+        self.upd_btn.setObjectName("primary")
+        self.upd_btn.setVisible(False)
+        self.upd_btn.clicked.connect(self._update_now)
+        head.addWidget(self.upd_btn)
+        head.addSpacing(8)
         self.srv_chip = QLabel("キュー: 接続中…")
         self.srv_chip.setObjectName("muted")
         self.srv_chip.setTextInteractionFlags(Qt.TextBrowserInteraction)
@@ -587,7 +602,10 @@ class AvMainWindow(QMainWindow):
         self._save()
 
         def extra():
-            lines = []
+            u = self._upd                   # 確認済みの結果（ここで取りに行くと画面が止まるため）
+            lines =[f"{APP_NAME} {app_version()}" + (f"（新しい版 {u['latest']} があります。見出しの「更新」から入れ替えます）"
+                                                        if u.get("available") else
+                                                        (f"（{u['error']}）" if u.get("error") else "（最新です）"))]
             for k in E.ENCODERS:
                 ok, msg = A.encoder_status(k, (self.s.encoder_paths or {}).get(k, ""))
                 lines.append(f"{E.ENCODER_LABELS[k].split('（')[0]}: {'使用可' if ok else '使用不可'}（{msg}）")
@@ -624,6 +642,82 @@ class AvMainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "保存先", self.out_edit.text() or self.s.recent_dir or str(Path.home()))
         if d:
             self.out_edit.setText(str(Path(d)))
+
+    # ---------------------------------------------------------------- 更新
+    def _check_update(self, force: bool):
+        sig = self.usig
+
+        class Task(QRunnable):
+            def run(self):
+                _emit(sig, U.check(force), {}, "", 0.0)
+        self.pool.start(Task())
+
+    @Slot(object, object, str, float)
+    def _on_update_info(self, info, _l, _e, _t):
+        self._upd = info or {}
+        ok = bool(self._upd.get("available"))
+        self.upd_btn.setVisible(ok)
+        if ok:
+            self.upd_btn.setText(f"更新 {self._upd['latest']}")
+            self.upd_btn.setToolTip(f"いまの版 {self._upd['current']} → 新しい版 {self._upd['latest']}\n\n"
+                                    + (self._upd.get("notes") or "")[:1500])
+
+    def _show_last_update(self):
+        st = U.last_status()
+        if not st or st.get("shown") or st.get("state") == "running":
+            return
+        U.mark_shown()
+        box = QMessageBox.information if st.get("state") == "done" else QMessageBox.warning
+        box(self, APP_NAME, st.get("message", "") + "\n\n詳しい経過は logs/update.log にあります。")
+
+    def _update_now(self):
+        info = self._upd
+        if not info.get("available"):
+            return
+        if self._active or any(r.state == ST_RUNNING for r in self.rows.values()):
+            QMessageBox.information(self, APP_NAME, "エンコード中は更新できません。停止するか、終わってから更新してください。")
+            return
+        box = QMessageBox(QMessageBox.Question, APP_NAME,
+                          f"{info['current']} から {info['latest']} に更新します。\n\n"
+                          "入れ替えの間（1〜数分）、この画面と Web 画面は閉じ、終わると自動で開き直します。"
+                          "キューと設定は残ります。", parent=self)
+        if info.get("notes"):
+            box.setDetailedText(info["notes"])
+        go = box.addButton("更新する", QMessageBox.AcceptRole)
+        box.addButton("キャンセル", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not go:
+            return
+        self._save()
+        dlg = QProgressDialog(f"{info['latest']} を取得しています…", None, 0, 0, self)
+        dlg.setWindowTitle(APP_NAME)
+        dlg.setMinimumDuration(0)
+        dlg.show()
+        sig = self.usig2 = PollSig()
+        sig.done.connect(lambda _a, _b, err, _c: self._on_downloaded(dlg, err))
+
+        class Task(QRunnable):
+            def run(self):
+                try:
+                    U.download(info)
+                    _emit(sig, None, {}, "", 0.0)
+                except Exception as e:  # noqa: BLE001
+                    _emit(sig, None, {}, str(e) or "取得に失敗しました", 0.0)
+        self.pool.start(Task())
+
+    def _on_downloaded(self, dlg, err):
+        dlg.close()
+        if err:
+            QMessageBox.warning(self, APP_NAME, f"新しい版を取得できませんでした。\n{err}")
+            return
+        try:
+            U.spawn_apply([KIND])
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, f"更新を始められませんでした。\n{e}")
+            return
+        self._closing_for_update = True
+        self.close()
+        QApplication.instance().quit()
 
     # ---------------------------------------------------------------- 一覧
     def dragEnterEvent(self, e):
@@ -1066,7 +1160,7 @@ class AvMainWindow(QMainWindow):
             self.cur.setText(a.get("message", ""))
 
     def closeEvent(self, e):
-        if self._active and any(r.jid and r.state in (ST_QUEUED, ST_RUNNING) for r in self.rows.values()):
+        if not getattr(self, "_closing_for_update", False) and self._active and any(r.jid and r.state in (ST_QUEUED, ST_RUNNING) for r in self.rows.values()):
             box = QMessageBox(QMessageBox.Question, APP_NAME,
                               "エンコードはこの画面を閉じても裏で続きます（Web 画面でも確認できます）。\n"
                               "停止する場合も、途中までの分は残り、次に開始すると続きから再開します。", parent=self)

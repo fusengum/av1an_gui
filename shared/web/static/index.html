@@ -140,6 +140,13 @@ details.adv{margin-top:8px} details.adv>summary{cursor:pointer;color:var(--muted
 <!-- 環境 -->
 <section id="env">
   <div class="card">
+    <div class="row" style="justify-content:space-between"><h2 style="margin:0">このプログラム</h2>
+      <div><button class="b" onclick="loadUpdate(true)">更新を確認</button>
+      <button class="p" id="updbtn" style="display:none" onclick="applyUpdate()">更新する</button></div></div>
+    <div id="updinfo"></div>
+    <div id="updmsg" class="small muted"></div>
+  </div>
+  <div class="card">
     <div class="row" style="justify-content:space-between"><h2 style="margin:0">外部ツール</h2>
       <button class="p" id="instbtn" onclick="install(null)">不足ツールを自動セットアップ</button></div>
     <div id="instmsg" class="small muted"></div>
@@ -332,7 +339,21 @@ async function assistCalc(save){try{const r=await api('/api/assist/'+ASK,{method
 // ---- 環境
 async function loadEnvChip(){try{const r=await api('/api/env');const bad=r.tools.filter(t=>t.required&&!t.ok);const c=$('envchip');
   c.className='chip '+(bad.length?'ng':'ok');c.textContent=bad.length?'要セットアップ: '+bad.map(t=>t.label).join(', '):'環境 OK'}catch(e){}}
+async function loadUpdate(force){
+  $('updmsg').textContent=force?'確認しています…':'';
+  let u;try{u=await api('/api/update'+(force?'?force=1':''))}catch(e){$('updmsg').textContent=e.message;return}
+  $('updinfo').innerHTML=`いまの版 <b>${esc(u.current)}</b>`+(u.latest?`　／　最新 <b>${esc(u.latest)}</b>`:'')+
+    (u.available?' <span class="chip ok">新しい版があります</span>':(u.latest?' <span class="muted">（最新です）</span>':''))+
+    (u.notes?`<pre class="log" style="max-height:200px;margin-top:8px">${esc(u.notes)}</pre>`:'');
+  $('updbtn').style.display=u.available&&!u.apply.running?'':'none';
+  const last=u.last||{};
+  $('updmsg').textContent=u.apply.running?u.apply.message:(u.apply.error?'エラー: '+u.apply.error:(u.error?u.error:(last.message?'前回の更新: '+last.message:'')));
+  if(u.apply.running)setTimeout(()=>loadUpdate(false),2000)}
+async function applyUpdate(){
+  if(!confirm('新しい版に入れ替えます。入れ替えの間（1〜数分）、Web 画面とデスクトップ版は止まり、終わると起動し直します。キューは残ります。よろしいですか？'))return;
+  try{await api('/api/update/apply',{method:'POST'});loadUpdate(false)}catch(e){$('updmsg').textContent=e.message}}
 async function loadEnv(){
+  loadUpdate(false);
   const r=await api('/api/env');
   $('tools').innerHTML=r.tools.map(t=>`<tr><td>${esc(t.label)}</td><td><span class="chip ${t.ok?'ok':'ng'}">${t.ok?'✔':(t.required?'✖':'—')}</span></td>
    <td class="small">${t.ok?esc(t.path)+'<br><span class="muted">'+esc(t.version)+'</span>':'<span class="muted">'+esc(t.note||'見つかりません')+'</span>'}</td>

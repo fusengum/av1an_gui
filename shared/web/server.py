@@ -24,7 +24,7 @@ from shared.core import probe as P
 from shared.core import tools
 from shared.core.config import APP_ROOT, IS_WIN
 from shared.core.runner import Cancelled
-from shared.version import code_fingerprint
+from shared.version import app_version, code_fingerprint
 
 from .apps import load_apps
 
@@ -32,7 +32,7 @@ STATIC = Path(__file__).parent / "static"
 MEDIA_EXTS = {".mkv", ".mka", ".mp4", ".m4v", ".mov", ".m2ts", ".mts", ".ts", ".hevc", ".h264", ".264", ".ivf",
               ".wav", ".flac", ".webm", ".avi", ".y4m"}
 HIDDEN_SETTINGS = {"window_geometry", "recent_dir"}
-VERSION = "0.3.0"
+VERSION = app_version()
 INSTANCE = uuid.uuid4().hex[:12]       # 起動ごとに変わる（デスクトップ版がサーバーの再起動を見分ける）
 CODE = code_fingerprint()              # 起動したときのコード（デスクトップ版がファイルと比べ、古ければ起動し直す）
 
@@ -660,6 +660,44 @@ class InstallReq(BaseModel):
 @app.post("/api/env/install")
 def env_install(req: InstallReq):
     ENV.start(req.names)
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ 更新
+
+UPDATE = {"running": False, "message": "", "error": ""}
+
+
+@app.get("/api/update")
+def update_info(force: bool = False):
+    """いまの版と最新のリリース（1 日 1 回だけ取りに行く。force で今すぐ）"""
+    from shared import update as U
+    return {**U.check(force), "apply": UPDATE, "last": U.last_status()}
+
+
+@app.post("/api/update/apply")
+def update_apply():
+    """新しい版を取ってきて、更新用のプロセスに入れ替えを任せる（サーバーと GUI は止まり、起動し直す）"""
+    from shared import update as U
+    if any(j.state == "running" for j in Q.list()):
+        raise HTTPException(409, "エンコード中は更新できません。キューを停止するか、終わってから更新してください")
+    if UPDATE["running"]:
+        return {"ok": True}
+    info = U.check()
+    if not info.get("available"):
+        raise HTTPException(400, info.get("error") or "新しい版はありません")
+
+    def run():
+        UPDATE.update(running=True, error="", message="取得中…")
+        try:
+            U.download(info, lambda m, f: UPDATE.__setitem__("message", m))
+            Q.save()
+            U.spawn_apply()
+            UPDATE["message"] = f"{info['version']} に入れ替えています。しばらくすると画面が戻ります"
+        except Exception as e:  # noqa: BLE001
+            UPDATE.update(running=False, error=str(e), message="")
+
+    threading.Thread(target=run, daemon=True).start()
     return {"ok": True}
 
 
