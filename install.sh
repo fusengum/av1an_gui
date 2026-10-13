@@ -143,6 +143,9 @@ WEBSVC=$(cd "$APP" && "$PY" -c "from shared import app_infos as a; i=a(); w=[x.g
 # 7. Web 画面（systemd で常駐）
 if [ $WEB -eq 1 ] && command -v systemctl >/dev/null; then
   step "Web 画面を登録（ポート $PORT）"
+  # 待ち受けは settings_web.json に書き、サーバーは引数なしで起動する（デスクトップ版の設定から変えられるように）
+  printf '{"lan": true, "port": %s, "autostart": true}\n' "$PORT" > "$APP/settings_web.json"
+  [ -n "${SUDO_USER:-}" ] && chown "$SUDO_USER": "$APP/settings_web.json"
   $SUDO tee /etc/systemd/system/$WEBSVC.service >/dev/null <<UNIT
 [Unit]
 Description=$SUITE Web UI
@@ -152,8 +155,10 @@ After=network-online.target docker.service
 User=$RUN_USER
 SupplementaryGroups=docker
 WorkingDirectory=$APP
-ExecStart=$PY -m shared.web --host 0.0.0.0 --port $PORT
+ExecStart=$PY -m shared.web
+# 設定を変えたときはサーバーが異常終了扱いで終わり、ここで起動し直される
 Restart=on-failure
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target

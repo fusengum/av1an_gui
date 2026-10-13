@@ -56,6 +56,29 @@ pre.log{background:#121418;border:1px solid var(--line);border-radius:6px;paddin
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line2);border-radius:8px;width:min(1100px,94vw)}
 dialog::backdrop{background:#0008}
 .opt{display:none} .opt.on{display:block}
+/* 設定: 左に見出し、右に「名前 / 入力欄 + 説明」 */
+.setwrap{display:grid;grid-template-columns:220px 1fr;gap:16px;align-items:start}
+.snav{display:flex;flex-direction:column;gap:2px;position:sticky;top:12px}
+.snav .app{color:var(--muted);font-size:12px;margin:10px 10px 4px}
+.snav button{background:none;border:none;border-left:2px solid transparent;color:var(--muted);text-align:left;padding:8px 12px;cursor:pointer;font:inherit;border-radius:0 4px 4px 0}
+.snav button:hover{background:var(--panel)} .snav button.on{color:var(--text);border-left-color:var(--accent);background:var(--panel)}
+.spage h2{font-size:16px;color:var(--text);margin:0 0 4px}
+.spage .note{color:var(--muted);margin:0 0 12px}
+.field{display:grid;grid-template-columns:230px minmax(0,1fr);gap:4px 18px;padding:12px 0;border-top:1px solid var(--line)}
+.field>.name{font-weight:600;padding-top:5px}
+.field .hint{color:var(--muted);font-size:12px;margin-top:4px}
+.field select,.field input[type=text]{width:100%;max-width:560px}
+.field input[type=number]{width:140px}
+.field .unit{color:var(--muted);margin-left:6px}
+.field.hide{display:none}
+details.adv{margin-top:8px} details.adv>summary{cursor:pointer;color:var(--muted);padding:8px 0}
+.sbar{display:flex;gap:10px;align-items:center;justify-content:flex-end;margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
+.ro{display:grid;grid-template-columns:230px 1fr;gap:6px 18px;margin:8px 0}
+.ro div:nth-child(odd){color:var(--muted)}
+.after{display:flex;gap:8px;align-items:center}
+.banner{background:#33291a;border:1px solid #5a4620;color:#f0d9a8;border-radius:6px;padding:10px 14px;margin-bottom:14px;display:none;align-items:center;gap:12px}
+@media (max-width:900px){.setwrap{grid-template-columns:1fr} .snav{position:static;flex-direction:row;flex-wrap:wrap}
+  .field,.ro{grid-template-columns:1fr} .field>.name{padding-top:0}}
 </style>
 </head>
 <body>
@@ -74,6 +97,7 @@ dialog::backdrop{background:#0008}
 
 <!-- キュー（ファイル追加も同じ画面） -->
 <section id="queue" class="on">
+  <div class="banner" id="afterbanner"><span id="aftertext"></span><button class="b" onclick="setAfter('none')">取り消す</button></div>
   <div class="grid2">
     <div class="card">
       <h2>ファイルを選ぶ（この VM 上のファイル）</h2>
@@ -96,7 +120,9 @@ dialog::backdrop{background:#0008}
   <div class="card">
     <div class="row" style="justify-content:space-between">
       <h2 style="margin:0">ジョブ（上から順に 1 件ずつ処理）</h2>
-      <div><button class="d" id="stopall" style="display:none" onclick="if(confirm('待機中と処理中のジョブをすべて中止します。途中までの分は残り、再実行すると続きから再開します。'))api('/api/jobs/stop',{method:'POST'}).then(refresh)">すべて中止</button>
+      <div class="after"><span class="small muted" title="キューのファイルがすべて終わった後の動作です。実行の 60 秒前から取り消せます。すべて中止した場合や、最後のファイルを中止した場合は実行しません。デスクトップ版と共通です。">終わったら</span>
+        <select id="after" onchange="setAfter(this.value)"></select>
+      <button class="d" id="stopall" style="display:none" onclick="if(confirm('待機中と処理中のジョブをすべて中止します。途中までの分は残り、再実行すると続きから再開します。'))api('/api/jobs/stop',{method:'POST'}).then(refresh)">すべて中止</button>
       <button class="b" onclick="api('/api/jobs/clear',{method:'POST'}).then(refresh)">終わったものを消去</button></div>
     </div>
     <table><thead><tr><th>ファイル</th><th>ツール</th><th>内容</th><th style="width:22%">進捗</th><th>状態</th><th></th></tr></thead>
@@ -107,7 +133,7 @@ dialog::backdrop{background:#0008}
 
 <!-- 設定 -->
 <section id="set">
-  <div class="grid2" id="setcards"></div>
+  <div class="setwrap"><div class="snav" id="snav"></div><div class="card spage" id="spage"></div></div>
 </section>
 
 <!-- 環境 -->
@@ -168,6 +194,7 @@ async function refresh(){
   let s;try{s=await api('/api/state')}catch(e){return}
   const tb=$('jobs');$('nojobs').style.display=s.jobs.length?'none':'';
   $('stopall').style.display=s.jobs.some(j=>['queued','running'].includes(j.state))?'':'none';
+  showAfter(s.after);
   tb.innerHTML=s.jobs.map(j=>`<tr>
     <td title="${esc(j.path)}">${esc(j.name)}${j.output?`<div class="small muted" title="${esc(j.output)}">→ ${esc(j.output.split(/[\\/]/).pop())}</div>`:''}</td>
     <td><img src="/icon/${j.kind}" width="18" style="vertical-align:middle"> ${esc(APPS[j.kind]?.name||j.kind)}</td>
@@ -180,6 +207,15 @@ async function refresh(){
       ${j.state!=='running'?`<button class="b" onclick="api('/api/jobs/${j.id}',{method:'DELETE'}).then(refresh)">削除</button>`:''}</td></tr>`).join('');
   if(curLog&&$('logdlg').open)pullLog();
 }
+let afterTouched=0;
+function showAfter(a){if(!a)return;const sel=$('after');
+  if(!sel.options.length)opts(sel,a.choices);
+  if(Date.now()-afterTouched>2000&&document.activeElement!==sel)sel.value=a.action;
+  const b=$('afterbanner');
+  if(a.seconds>0){b.style.display='flex';$('aftertext').textContent=`すべて終わりました。あと ${a.seconds} 秒で${a.label}します。`}
+  else if(a.message&&a.action==='none'){b.style.display='none'}
+  else b.style.display='none'}
+async function setAfter(v){afterTouched=Date.now();try{showAfter(await api('/api/after',{method:'POST',body:JSON.stringify({action:v})}))}catch(e){alert(e.message)}}
 async function showLog(id,name){curLog=id;logNext=0;$('logbox').textContent='';$('logtitle').textContent=name;$('logdlg').showModal();pullLog()}
 async function pullLog(){const r=await api(`/api/jobs/${curLog}/log?since=${logNext}`);if(r.lines.length){const b=$('logbox');const atEnd=b.scrollTop+b.clientHeight>=b.scrollHeight-20;b.textContent+=r.lines.join('\n')+'\n';if(atEnd)b.scrollTop=b.scrollHeight}logNext=r.next}
 
@@ -208,30 +244,76 @@ async function addJobs(){
   catch(e){$('addmsg').textContent=e.message}
 }
 
-// ---- 設定
+// ---- 設定（各ツールの settings_sections。左の見出しを選ぶと右にその項目を出す）
+let SET={}, CURSEC=null;
 function getv(s,f){if(f.includes('.')){const[a,b]=f.split(/\.(.+)/);return (s[a]||{})[b]??''}return s[f]}
+function setv(s,f,v){if(f.includes('.')){const[a,b]=f.split(/\.(.+)/);s[a]={...(s[a]||{}),[b]:v}}else s[f]=v}
+function rkey(s,k){return k.replace(/\{(\w+)\}/g,(_,n)=>getv(s,n))}
+function shown(s,f){return Object.entries(f.show_if||{}).every(([k,v])=>(Array.isArray(v)?v:[v]).includes(getv(s,k)))}
 async function loadSet(){
-  const wrap=$('setcards');wrap.innerHTML='';
-  for(const a of META.apps){const card=document.createElement('div');card.className='card';card.innerHTML=`<h2>${esc(a.name)}（${esc(a.desc)}）</h2><div id="set-${a.id}"></div>`;
-   try{const s=await api('/api/settings/'+a.id);
-    const box=card.querySelector('div');
-    for(const[f,label,type,tip,choices]of a.settings_fields){const row=document.createElement('div');row.className='row';const t=tipOf(a.id,tip);
-      row.innerHTML=`<label>${esc(label)}${t?`<span class="tip" title="${esc(t)}">ⓘ</span>`:''}</label>`;let el;const v=getv(s,f);
-      if(type==='bool'){el=document.createElement('input');el.type='checkbox';el.checked=!!v}
-      else if(type==='text'||type==='number'){el=document.createElement('input');el.type=type;el.value=v??'';if(type==='number')el.step='any';if(type==='text')el.style.flex='1'}
-      else{el=document.createElement('select');opts(el,choices||{},v)}
-      el.dataset.f=f;el.dataset.type=type;row.appendChild(el);box.appendChild(row)}
-    if(a.assist){const ab=document.createElement('div');ab.className='row';ab.innerHTML=`<label>並列数アシスト</label><button class="b">質問に答えて並列数を決める…</button>`;
-      ab.querySelector('button').onclick=()=>openAssist(a.id);box.appendChild(ab)}
-    if(a.settings_note){const p=document.createElement('p');p.className='small muted';p.textContent=a.settings_note;box.appendChild(p)}
-    const r=document.createElement('div');r.className='row';r.innerHTML=`<button class="p">保存</button><span class="small" id="msg-${a.id}"></span>`;
-    r.querySelector('button').onclick=()=>saveSet(a.id);card.appendChild(r)
-   }catch(e){const p=document.createElement('p');p.className='small';p.style.color='var(--ng,#dc2626)';
-     p.textContent='設定を読み込めませんでした: '+e.message+'（Web 画面を再起動するか、インストーラーをもう一度実行してください）';card.appendChild(p)}
-   wrap.appendChild(card)}
+  const nav=$('snav');nav.innerHTML='';
+  for(const a of META.apps){
+    if(META.apps.length>1){const h=document.createElement('div');h.className='app';h.textContent=a.name;nav.appendChild(h)}
+    try{SET[a.id]=await api('/api/settings/'+a.id)}catch(e){SET[a.id]=null}
+    for(const sec of a.settings_sections||[]){const b=document.createElement('button');b.textContent=sec.title;b.dataset.k=a.id+'/'+sec.id;
+      b.onclick=()=>openSec(a.id,sec.id);nav.appendChild(b)}}
+  const w=document.createElement('button');w.textContent='Web 画面';w.dataset.k='/web';w.onclick=()=>openWeb();nav.appendChild(w);
+  if(CURSEC&&CURSEC[0]==='/web')openWeb();else if(CURSEC)openSec(...CURSEC);
+  else{const a=META.apps[0];if(a&&a.settings_sections?.length)openSec(a.id,a.settings_sections[0].id);else openWeb()}
 }
-async function saveSet(k){const data={};$('set-'+k).querySelectorAll('[data-f]').forEach(el=>{data[el.dataset.f]=el.dataset.type==='bool'?el.checked:el.dataset.type==='number'?+el.value:el.value});
-  try{await api('/api/settings/'+k,{method:'PUT',body:JSON.stringify(data)});$('msg-'+k).textContent='保存しました';setTimeout(()=>$('msg-'+k).textContent='',2500)}catch(e){$('msg-'+k).textContent=e.message}}
+function navOn(k){$('snav').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.k===k))}
+function fieldEl(kind,f){
+  const s=SET[kind],key=rkey(s,f.key),v=getv(s,key),t=tipOf(kind,f.tip);
+  const row=document.createElement('div');row.className='field'+(shown(s,f)?'':' hide');
+  row.innerHTML=`<div class="name">${esc(f.label)}${t?`<span class="tip" title="${esc(t)}">ⓘ</span>`:''}</div><div class="ctl"></div>`;
+  const c=row.querySelector('.ctl');let el;
+  if(f.type==='bool'){el=document.createElement('input');el.type='checkbox';el.checked=!!v;
+    const l=document.createElement('label');l.style.cssText='display:inline-flex;gap:8px;align-items:center;cursor:pointer';l.append(el,document.createTextNode(v?'オン':'オフ'));
+    el.onchange=()=>{l.lastChild.textContent=el.checked?'オン':'オフ'};c.appendChild(l)}
+  else if(f.type==='select'){el=document.createElement('select');opts(el,f.choices||{},v);c.appendChild(el)}
+  else if(f.type==='int'||f.type==='number'){el=document.createElement('input');el.type='number';el.value=v??'';
+    if(f.min!=null)el.min=f.min;if(f.max!=null)el.max=f.max;el.step=f.step||(f.type==='int'?1:'any');c.appendChild(el);
+    if(f.suffix){const u=document.createElement('span');u.className='unit';u.textContent=f.suffix;c.appendChild(u)}
+    if(f.special){const u=document.createElement('span');u.className='unit';u.textContent=`（0 = ${f.special}）`;c.appendChild(u)}}
+  else{el=document.createElement('input');el.type='text';el.value=v??'';el.placeholder=f.placeholder||'';c.appendChild(el)}
+  const upd=()=>{let x=f.type==='bool'?el.checked:f.type==='int'?parseInt(el.value||'0',10):f.type==='number'?parseFloat(el.value||'0'):el.value;
+    setv(s,key,x);
+    // 表示の条件や {encoder} の置き換えに関わる項目なら、ページを描き直す
+    if(SECDEF(kind).some(g=>g.key.includes('{'+f.key+'}')||Object.keys(g.show_if||{}).includes(f.key)))openSec(kind,CURSEC[1],true)};
+  el.addEventListener('change',upd);
+  if(f.hint){const h=document.createElement('div');h.className='hint';h.textContent=f.hint;c.appendChild(h)}
+  return row}
+function SECDEF(kind){return (APPS[kind].settings_sections||[]).flatMap(x=>x.fields||[])}
+function openSec(kind,sid,keepScroll){
+  CURSEC=[kind,sid];navOn(kind+'/'+sid);const a=APPS[kind],sec=(a.settings_sections||[]).find(x=>x.id===sid),pg=$('spage');
+  if(!sec)return;
+  if(!SET[kind]){pg.innerHTML=`<p class="small" style="color:var(--ng)">設定を読み込めませんでした（Web 画面を再起動するか、インストーラーをもう一度実行してください）</p>`;return}
+  pg.innerHTML=`<h2>${esc(sec.title)}</h2>${sec.note?`<p class="note">${esc(sec.note)}</p>`:''}<div class="fl"></div>`;
+  const fl=pg.querySelector('.fl');
+  for(const f of sec.fields.filter(f=>!f.advanced))fl.appendChild(fieldEl(kind,f));
+  for(const ac of sec.actions||[]){if(ac.id==='assist'&&a.assist){const r=document.createElement('div');r.className='row';r.style.marginTop='12px';
+    r.innerHTML=`<button class="b">${esc(ac.label)}</button>`;r.querySelector('button').onclick=()=>openAssist(kind);fl.appendChild(r)}}
+  const adv=sec.fields.filter(f=>f.advanced);
+  if(adv.length){const d=document.createElement('details');d.className='adv';d.innerHTML='<summary>詳しい設定</summary>';
+    for(const f of adv)d.appendChild(fieldEl(kind,f));fl.appendChild(d);if(keepScroll&&openSec.adv)d.open=true;d.ontoggle=()=>openSec.adv=d.open}
+  if(a.settings_note){const p=document.createElement('p');p.className='small muted';p.style.marginTop='14px';p.textContent=a.settings_note;fl.appendChild(p)}
+  const bar=document.createElement('div');bar.className='sbar';bar.innerHTML=`<span class="small" id="setmsg"></span><button class="b">元に戻す</button><button class="p">保存</button>`;
+  const [undo,save]=bar.querySelectorAll('button');undo.onclick=async()=>{SET[kind]=await api('/api/settings/'+kind);openSec(kind,sid)};
+  save.onclick=()=>saveSet(kind);pg.appendChild(bar)}
+async function saveSet(kind){
+  // 定義にある項目の、いちばん上の名前ごとに送る（extra などの辞書は丸ごと）
+  const s=SET[kind],data={};
+  for(const f of SECDEF(kind)){const top=f.key.split('.')[0];data[top]=s[top]}
+  try{await api('/api/settings/'+kind,{method:'PUT',body:JSON.stringify(data)});$('setmsg').textContent='保存しました';setTimeout(()=>{const m=$('setmsg');if(m)m.textContent=''},2500)}
+  catch(e){$('setmsg').textContent=e.message}}
+async function openWeb(){
+  CURSEC=['/web'];navOn('/web');const pg=$('spage');
+  let w;try{w=await api('/api/web')}catch(e){pg.textContent=e.message;return}
+  pg.innerHTML=`<h2>Web 画面</h2><p class="note">キューと進捗はこのサーバーが受け持ち、デスクトップ版とこの画面に同じものが出ます。</p>
+   <div class="ro"><div>他の PC から使う</div><div>${w.lan?'はい（LAN に公開）':'いいえ（この PC の中だけ）'}</div>
+   <div>ポート</div><div>${w.port}</div><div>自動起動</div><div>${w.is_win?(w.autostart?'ログオン時に起動':'しない'):'systemd のサービス（'+esc(w.service)+'）'}</div></div>
+   <p class="small muted" style="margin-top:14px">変更は、この PC のデスクトップ版の「設定」→「Web 画面」から行ってください。`+
+   `ファイアウォールの許可（管理者の確認）や自動起動の登録が、この PC の画面で必要なためです。</p>`}
 
 // ---- 並列数アシスト
 let ASK=null;

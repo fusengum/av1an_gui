@@ -63,7 +63,7 @@ try {
     # 動いている Web 画面を止める（ライブラリのファイルが使用中だと更新できないため。最後に起動し直す）
     Stop-ScheduledTask -TaskName $WebName -ErrorAction SilentlyContinue
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*.web --host*' } |
+        Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*-m shared.web*' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
     # 2. Python と仮想環境
@@ -167,6 +167,12 @@ try {
     }
 
     # 6. Web 画面（ログオン時に自動起動）
+    #    待ち受けは settings_web.json に書き、サーバーは引数なしで起動する（デスクトップ版の設定から変えられるように）
+    $webCfg = Join-Path $App 'settings_web.json'
+    $lan = if ($NoWeb) { 'false' } else { 'true' }
+    if (-not $NoWeb -or -not (Test-Path $webCfg)) {
+        [IO.File]::WriteAllText($webCfg, "{`"lan`": $lan, `"port`": $Port, `"autostart`": $lan}")   # BOM なし（Python が読む）
+    }
     if (-not $NoWeb) {
         Mark 'firewall' 'run' "ファイアウォールの許可（TCP $Port）"
         # 先に待ち受けを始めると Windows の警告が出て、閉じるとブロック規則ができるため、先に設定する
@@ -175,7 +181,7 @@ try {
         else { Mark 'firewall' 'ng' 'ファイアウォールの許可（管理者の確認が拒否されました。後で web_firewall.bat を実行してください）' }
 
         Mark 'web' 'run' "Web 画面の自動起動（ポート $Port）"
-        $act = New-ScheduledTaskAction -Execute $Pyw -Argument "-m shared.web --host 0.0.0.0 --port $Port" -WorkingDirectory $App
+        $act = New-ScheduledTaskAction -Execute $Pyw -Argument '-m shared.web' -WorkingDirectory $App
         $trg = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         $startLnk = Join-Path ([Environment]::GetFolderPath('Startup')) "$WebName.lnk"
@@ -190,14 +196,14 @@ try {
             Say "タスクを登録できないため、スタートアップに登録します（$($_.Exception.Message)）" 'Yellow'
             $ws2 = New-Object -ComObject WScript.Shell
             $l = $ws2.CreateShortcut($startLnk)
-            $l.TargetPath = $Pyw; $l.Arguments = "-m shared.web --host 0.0.0.0 --port $Port"; $l.WorkingDirectory = $App
+            $l.TargetPath = $Pyw; $l.Arguments = '-m shared.web'; $l.WorkingDirectory = $App
             $l.IconLocation = Join-Path $App "$($AppList[0].Pkg)\assets\icon.ico"; $l.Save()
         }
         if ($viaTask) {
             Stop-ScheduledTask -TaskName $WebName -ErrorAction SilentlyContinue
             Start-ScheduledTask -TaskName $WebName
         } else {
-            Start-Process -FilePath $Pyw -ArgumentList "-m shared.web --host 0.0.0.0 --port $Port" -WorkingDirectory $App
+            Start-Process -FilePath $Pyw -ArgumentList '-m shared.web' -WorkingDirectory $App
         }
         $ok = $false
         for ($i = 0; $i -lt 15 -and -not $ok; $i++) {

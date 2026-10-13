@@ -1,6 +1,8 @@
 """av1an_gui メインウィンドウ
 キュー・進捗は Web 画面のサーバーが持つ（shared.web.client）。この画面で追加した行は「エンコード開始」で
-サーバーのキューに送られ、Web 画面から追加したものも含めて同じキューを表示する。"""
+サーバーのキューに送られ、Web 画面から追加したものも含めて同じキューを表示する。
+メイン画面にはエンコードの設定（エンコーダ・画質・速度・並列数・目標画質・追加パラメータなど）と保存先・
+終わった後の動作を置き、追加時の既定・分割・作業フォルダなどは設定画面（settings_schema.SECTIONS）にまとめる。"""
 from __future__ import annotations
 
 import time
@@ -9,12 +11,14 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-                               QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
-                               QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QSpinBox,
-                               QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
+                               QGroupBox, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+                               QProgressBar, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
+                               QToolButton, QVBoxLayout, QWidget)
 
 from shared.core import av1an as A
+from shared.core import power
 from shared.core import probe as P
 from shared.core import tools
 from shared.gui.settings_dialog import SettingsDialog
@@ -23,13 +27,15 @@ from shared.web.client import Client, ServerError
 from .. import APP_NAME, __version__
 from .. import encoders as E
 from ..config import AvSettings
-from ..encode import AUDIO_LABELS, CHUNK_LABELS, CROP_LABELS, RES_LABELS, SC_LABELS, AvJob, describe_plan
+from ..encode import AUDIO_LABELS, CROP_LABELS, RES_LABELS, SPLIT_LABELS, AvJob, describe_plan
 from ..env import TOOL_LIST
+from ..settings_schema import SECTIONS
 from .help import TIPS
 
 VIDEO_EXTS = {".mkv", ".m2ts", ".mts", ".ts", ".mp4", ".m4v", ".mov", ".webm", ".avi", ".hevc", ".y4m"}
 COL_FILE, COL_VINFO, COL_CONTENT, COL_RES, COL_CROP, COL_AUDIO, COL_STATUS, COL_PROG = range(8)
 PER_ROW = ("content", "res", "crop", "audio")
+PER_ROW_NAMES = {"content": "種類", "res": "解像度", "crop": "黒帯", "audio": "音声"}
 ST_PROBING, ST_READY, ST_ERROR, ST_RUNNING, ST_DONE, ST_FAILED, ST_CANCELLED = (
     "解析中…", "待機", "対象外", "処理中", "完了", "失敗", "中止")
 ST_QUEUED = "queued"                     # サーバーのキューで順番待ち
@@ -61,9 +67,17 @@ class ProbeTask(QRunnable):
 
     def run(self):
         try:
-            self.sig.done.emit(self.rid, P.probe(self.path, self.ffprobe), "")
+            r = (P.probe(self.path, self.ffprobe), "")
         except Exception as e:  # noqa: BLE001
-            self.sig.done.emit(self.rid, None, str(e))
+            r = (None, str(e))
+        _emit(self.sig, self.rid, *r)
+
+
+def _emit(sig, *args):
+    try:
+        sig.done.emit(*args)
+    except RuntimeError:          # 画面を閉じた後に終わった（受け取り先がもう無い）
+        pass
 
 
 class PollSig(QObject):
@@ -87,9 +101,10 @@ class PollTask(QRunnable):
                 if j["kind"] == KIND and pos is not None and j["log_lines"] > pos:
                     r = self.client.log(j["id"], pos)
                     logs[j["id"]] = (r["lines"], r["next"])
-            self.sig.done.emit(st, logs, "", t)
+            r = (st, logs, "", t)
         except Exception as e:  # noqa: BLE001
-            self.sig.done.emit(None, {}, str(e), t)
+            r = (None, {}, str(e), t)
+        _emit(self.sig, *r)
 
 
 def combo(labels: dict, current=None) -> QComboBox:
@@ -102,6 +117,7 @@ def combo(labels: dict, current=None) -> QComboBox:
 
 
 ROW_LABELS = {"content": E.CONTENT_LABELS, "res": RES_LABELS, "crop": CROP_LABELS, "audio": AUDIO_LABELS}
+DEFAULT_OF = {"content": "default_content", "res": "default_res", "crop": "default_crop", "audio": "default_audio"}
 
 
 class AvMainWindow(QMainWindow):
@@ -118,11 +134,13 @@ class AvMainWindow(QMainWindow):
         self._inst = None
         self._polling = False
         self._stopping = False
+        self._after_touched = 0.0
+        self._after_info = {}
+        self._cur_enc = self.s.encoder
         self.qsig = PollSig()
         self.qsig.done.connect(self._on_poll)
-        self._cur_enc = self.s.encoder
         self.setWindowTitle(f"{APP_NAME} {__version__}")
-        self.resize(1360, 900)
+        self.resize(1280, 780)
         self.setAcceptDrops(True)
         self._build()
         self._load()
@@ -139,8 +157,7 @@ class AvMainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- UI
     def _lbl(self, text, key):
-        colon = text.endswith(":")
-        lb = QLabel(f"{text.rstrip(':')} ⓘ" + (":" if colon else ""))
+        lb = QLabel(f"{text} ⓘ")
         lb.setToolTip(TIPS[key])
         lb.setCursor(Qt.WhatsThisCursor)
         return lb
@@ -150,6 +167,9 @@ class AvMainWindow(QMainWindow):
         self.setCentralWidget(c)
         root = QVBoxLayout(c)
         root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
+
+        # 見出し
         head = QHBoxLayout()
         t = QLabel(APP_NAME)
         t.setObjectName("title")
@@ -166,13 +186,14 @@ class AvMainWindow(QMainWindow):
         head.addSpacing(8)
         self.env_chip = QLabel()
         head.addWidget(self.env_chip)
-        b = QPushButton("環境設定")
-        b.clicked.connect(self._open_settings)
+        b = QPushButton("設定")
+        b.clicked.connect(lambda: self._open_settings())
         head.addWidget(b)
         root.addLayout(head)
 
-        split = QSplitter(Qt.Vertical)
-        root.addWidget(split, 1)
+        # ファイルの一覧（ログは下に畳んでおく）
+        self.split = QSplitter(Qt.Vertical)
+        root.addWidget(self.split, 1)
         top = QWidget()
         tl = QVBoxLayout(top)
         tl.setContentsMargins(0, 0, 0, 0)
@@ -181,7 +202,7 @@ class AvMainWindow(QMainWindow):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(COL_FILE, QHeaderView.Stretch)
         for col, wd in [(COL_VINFO, 190), (COL_CONTENT, 110), (COL_RES, 120), (COL_CROP, 150), (COL_AUDIO, 120),
-                        (COL_STATUS, 260), (COL_PROG, 100)]:
+                        (COL_STATUS, 300), (COL_PROG, 100)]:
             hh.setSectionResizeMode(col, QHeaderView.Interactive)
             self.table.setColumnWidth(col, wd)
         for col, key in [(COL_VINFO, "vinfo"), (COL_CONTENT, "content"), (COL_RES, "res"), (COL_CROP, "crop"),
@@ -192,6 +213,8 @@ class AvMainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._row_menu)
         tl.addWidget(self.table, 1)
         self.hint = QLabel("ここに動画ファイルやフォルダをドロップしてください", self.table.viewport())
         self.hint.setObjectName("drop")
@@ -204,52 +227,48 @@ class AvMainWindow(QMainWindow):
             bb.clicked.connect(slot)
             btns.addWidget(bb)
         btns.addStretch(1)
-        btns.addWidget(self._lbl("選択行に一括適用:", "bulk"))
-        self.bulk = {k: combo(ROW_LABELS[k]) for k in PER_ROW}
-        ab = QPushButton("適用")
-        ab.clicked.connect(self._apply_bulk)
-        for k in PER_ROW:
-            btns.addWidget(self.bulk[k])
-        btns.addWidget(ab)
+        tip = QLabel("行を選んで右クリックすると、種類・解像度・黒帯・音声をまとめて変えられます")
+        tip.setObjectName("muted")
+        btns.addWidget(tip)
         tl.addLayout(btns)
-        split.addWidget(top)
+        self.split.addWidget(top)
 
-        # エンコード設定
-        enc = QGroupBox("エンコード設定")
+        self.logw = QPlainTextEdit()
+        self.logw.setReadOnly(True)
+        self.logw.setMaximumBlockCount(20000)
+        self.split.addWidget(self.logw)
+        self.split.setStretchFactor(0, 3)
+        self.split.setStretchFactor(1, 1)
+
+        # エンコード
+        enc = QGroupBox("エンコード")
         g = QGridLayout(enc)
+        g.setHorizontalSpacing(10)
         g.setColumnStretch(6, 1)
         self.c_enc = combo(E.ENCODER_LABELS)
         self.c_q = combo(E.QUALITY_LABELS)
         self.sp_q = QSpinBox()
+        self.lb_qname = QLabel("")
+        self.lb_qname.setObjectName("muted")
         self.c_speed = combo(E.SPEED_LABELS)
+        for w, k in ((self.c_enc, "encoder"), (self.c_q, "quality"), (self.sp_q, "quality"), (self.c_speed, "speed")):
+            w.setToolTip(TIPS[k])
         g.addWidget(self._lbl("エンコーダ", "encoder"), 0, 0)
         g.addWidget(self.c_enc, 0, 1)
         g.addWidget(self._lbl("画質", "quality"), 0, 2)
         hq = QHBoxLayout()
         hq.addWidget(self.c_q)
-        self.lb_qname = QLabel("")
-        self.lb_qname.setObjectName("muted")
         hq.addWidget(self.lb_qname)
         hq.addWidget(self.sp_q)
         g.addLayout(hq, 0, 3)
         g.addWidget(self._lbl("速度", "speed"), 0, 4)
         g.addWidget(self.c_speed, 0, 5)
-        for w, k in ((self.c_enc, "encoder"), (self.c_q, "quality"), (self.sp_q, "quality"), (self.c_speed, "speed")):
-            w.setToolTip(TIPS[k])
         self.c_enc.currentIndexChanged.connect(self._enc_changed)
         self.c_q.currentIndexChanged.connect(self._q_changed)
+        self.sp_q.valueChanged.connect(self._refresh_rows)
         self.c_speed.currentIndexChanged.connect(self._refresh_rows)
 
-        g.addWidget(self._lbl("新規追加時の既定:", "default"), 1, 0)
-        self.defaults = {k: combo(ROW_LABELS[k]) for k in PER_ROW}
-        hd = QHBoxLayout()
-        for k in PER_ROW:
-            self.defaults[k].setToolTip(TIPS[k])
-            hd.addWidget(self.defaults[k])
-        hd.addStretch(1)
-        g.addLayout(hd, 1, 1, 1, 6)
-
-        g.addWidget(self._lbl("並列数", "workers"), 2, 0)
+        g.addWidget(self._lbl("並列数", "workers"), 1, 0)
         hp = QHBoxLayout()
         self.sp_w = QSpinBox()
         self.sp_w.setRange(0, 4096)
@@ -266,19 +285,19 @@ class AvMainWindow(QMainWindow):
         hp.addSpacing(8)
         b_assist = QPushButton("アシスト…")
         b_assist.setToolTip(TIPS["assist"])
-        b_assist.clicked.connect(self._assist)
+        b_assist.clicked.connect(lambda: self._assist(self))
         hp.addWidget(b_assist)
         hp.addSpacing(12)
-        self.lb_auto = QLabel("")
-        self.lb_auto.setObjectName("muted")
-        self.lb_auto.setToolTip(TIPS["auto"])
-        hp.addWidget(self.lb_auto)
+        self.lb_par = QLabel("")
+        self.lb_par.setObjectName("muted")
+        self.lb_par.setToolTip(TIPS["auto"])
+        hp.addWidget(self.lb_par)
         hp.addStretch(1)
-        g.addLayout(hp, 2, 1, 1, 6)
-        self.sp_w.valueChanged.connect(self._update_auto)
-        self.sp_t.valueChanged.connect(self._update_auto)
+        g.addLayout(hp, 1, 1, 1, 6)
+        self.sp_w.valueChanged.connect(self._par_changed)
+        self.sp_t.valueChanged.connect(self._par_changed)
 
-        g.addWidget(self._lbl("目標画質", "target"), 3, 0)
+        g.addWidget(self._lbl("目標画質", "target"), 2, 0)
         ht = QHBoxLayout()
         self.cb_tq = QCheckBox("VMAF を目標にする")
         self.sp_vmaf = QDoubleSpinBox()
@@ -295,14 +314,15 @@ class AvMainWindow(QMainWindow):
         ht.addWidget(self._lbl("試行回数", "probes"))
         ht.addWidget(self.sp_probes)
         ht.addStretch(1)
-        g.addLayout(ht, 3, 1, 1, 6)
+        g.addLayout(ht, 2, 1, 1, 6)
         self.cb_tq.toggled.connect(self._tq_toggled)
+        self.sp_vmaf.valueChanged.connect(self._tq_toggled)
 
-        g.addWidget(self._lbl("追加パラメータ", "extra"), 4, 0)
+        g.addWidget(self._lbl("追加パラメータ", "extra"), 3, 0)
         self.ed_extra = QLineEdit()
         self.ed_extra.setToolTip(TIPS["extra"])
-        g.addWidget(self.ed_extra, 4, 1, 1, 6)
-        g.addWidget(self._lbl("エンコーダの場所", "encoder_path"), 5, 0)
+        g.addWidget(self.ed_extra, 3, 1, 1, 6)
+        g.addWidget(self._lbl("エンコーダの場所", "encoder_path"), 4, 0)
         he = QHBoxLayout()
         self.ed_path = QLineEdit()
         self.ed_path.setPlaceholderText("空欄 = 自動で取得したものを使います（SVT-AV1-PSY などを使うときに指定します）")
@@ -314,80 +334,60 @@ class AvMainWindow(QMainWindow):
         he.addWidget(self.ed_path, 1)
         he.addWidget(pb)
         he.addWidget(self.lb_encst)
-        g.addLayout(he, 5, 1, 1, 6)
+        g.addLayout(he, 4, 1, 1, 6)
         self.ed_path.editingFinished.connect(self._encoder_status)
-        split.addWidget(enc)
 
-        # 分割の詳細
-        adv = QGroupBox("分割（av1an）")
-        ga = QHBoxLayout(adv)
-        self.c_chunk = combo(CHUNK_LABELS)
-        self.c_sc = combo(SC_LABELS)
-        self.sp_maxsc = QDoubleSpinBox()
-        self.sp_maxsc.setRange(1, 600)
-        self.sp_maxsc.setSuffix(" 秒")
-        self.sp_minsc = QSpinBox()
-        self.sp_minsc.setRange(1, 1000)
-        self.sp_minsc.setSuffix(" フレーム")
-        for lbl, key, w in (("分割方法", "chunk", self.c_chunk), ("シーン検出", "sc", self.c_sc),
-                            ("最大の長さ", "max_scene", self.sp_maxsc), ("最小の長さ", "min_scene", self.sp_minsc)):
-            ga.addWidget(self._lbl(lbl, key))
-            w.setToolTip(TIPS[key])
-            ga.addWidget(w)
-            ga.addSpacing(10)
-        ga.addStretch(1)
-        split.addWidget(adv)
-
-        # 出力
-        opt = QGroupBox("出力設定")
-        go = QGridLayout(opt)
-        go.setColumnStretch(2, 1)
-        self.rb_same = QRadioButton("入力と同じフォルダ")
-        self.rb_custom = QRadioButton("指定:")
-        grp = QButtonGroup(self)
-        grp.addButton(self.rb_same)
-        grp.addButton(self.rb_custom)
+        g.addWidget(self._lbl("保存先", "out_dir"), 5, 0)
+        ho = QHBoxLayout()
         self.out_edit = QLineEdit()
+        self.out_edit.setPlaceholderText("空欄 = 入力と同じフォルダ")
+        self.out_edit.setClearButtonEnabled(True)
         ob = QPushButton("参照…")
-        ob.clicked.connect(lambda: self._browse(self.out_edit, self.rb_custom))
-        go.addWidget(self._lbl("保存先", "out_dir"), 0, 0)
-        go.addWidget(self.rb_same, 0, 1)
-        h = QHBoxLayout()
-        h.addWidget(self.rb_custom)
-        h.addWidget(self.out_edit, 1)
-        h.addWidget(ob)
-        go.addLayout(h, 0, 2)
-        go.addWidget(self._lbl("ファイル名", "suffix"), 1, 0)
-        self.suffix = QLineEdit()
-        self.suffix.setPlaceholderText("空欄 = 自動（_AV1 / _HEVC / _AVC）")
-        self.suffix.setMaximumWidth(260)
-        go.addWidget(self.suffix, 1, 1)
-        go.addWidget(self._lbl("作業フォルダ", "temp_dir"), 2, 0)
-        self.tmp = QLineEdit()
-        self.tmp.setPlaceholderText("空欄 = 保存先に一時フォルダを作ります")
-        tb = QPushButton("参照…")
-        tb.clicked.connect(lambda: self._browse(self.tmp, None))
-        self.cb_keep_tmp = QCheckBox("作業ファイルを残す")
-        self.cb_keep_tmp.setToolTip(TIPS["keep_temp"])
-        h2 = QHBoxLayout()
-        h2.addWidget(self.tmp, 1)
-        h2.addWidget(tb)
-        h2.addWidget(self.cb_keep_tmp)
-        go.addLayout(h2, 2, 1, 1, 2)
-        split.addWidget(opt)
+        ob.clicked.connect(self._browse_out)
+        ho.addWidget(self.out_edit, 1)
+        ho.addWidget(ob)
+        g.addLayout(ho, 5, 1, 1, 6)
 
-        self.logw = QPlainTextEdit()
-        self.logw.setReadOnly(True)
-        self.logw.setMaximumBlockCount(20000)
-        split.addWidget(self.logw)
-        split.setSizes([320, 220, 60, 130, 140])
+        # 設定画面にあるものの要約
+        sumrow = QHBoxLayout()
+        self.lb_auto = QLabel("")
+        self.lb_auto.setObjectName("muted")
+        self.lb_auto.setWordWrap(True)
+        more = QPushButton("その他の設定…")
+        more.setToolTip("分割・追加時の既定・ファイル名・作業フォルダ・Web 画面・外部ツール")
+        more.clicked.connect(lambda: self._open_settings("split"))
+        sumrow.addWidget(self.lb_auto, 1)
+        sumrow.addWidget(more)
+        g.addLayout(sumrow, 6, 0, 1, 7)
+        root.addWidget(enc)
 
+        # 実行
         run = QHBoxLayout()
+        self.log_btn = QToolButton()
+        self.log_btn.setText("ログ")
+        self.log_btn.setCheckable(True)
+        self.log_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.log_btn.toggled.connect(self._toggle_log)
+        run.addWidget(self.log_btn)
         self.cur = QLabel("")
         self.cur.setObjectName("muted")
         self.total = QProgressBar()
         self.total.setRange(0, 1000)
         self.total.setFormat("全体 %p%")
+        run.addWidget(self.cur, 1)
+        run.addWidget(self.total, 1)
+        run.addSpacing(8)
+        run.addWidget(QLabel("終わったら"))
+        self.c_after = combo(power.LABELS)
+        self.c_after.setToolTip("キューのファイルがすべて終わった後の動作です。実行の 60 秒前から取り消せます。"
+                                "停止ボタンで止めた場合や、最後のファイルを中止した場合は実行しません。"
+                                "Web 画面と共通です。")
+        self.c_after.currentIndexChanged.connect(self._after_changed)
+        run.addWidget(self.c_after)
+        self.btn_after_cancel = QPushButton("取り消す")
+        self.btn_after_cancel.setVisible(False)
+        self.btn_after_cancel.clicked.connect(lambda: self._set_after(power.NONE))
+        run.addWidget(self.btn_after_cancel)
         self.btn_stop = QPushButton("停止")
         self.btn_stop.setObjectName("danger")
         self.btn_stop.setEnabled(False)
@@ -395,9 +395,10 @@ class AvMainWindow(QMainWindow):
         self.btn_start = QPushButton("エンコード開始")
         self.btn_start.setObjectName("primary")
         self.btn_start.clicked.connect(self._start)
-        for wdg, st in ((self.cur, 1), (self.total, 1), (self.btn_stop, 0), (self.btn_start, 0)):
-            run.addWidget(wdg, st)
+        run.addWidget(self.btn_stop)
+        run.addWidget(self.btn_start)
         root.addLayout(run)
+
         a = QAction(self)
         a.setShortcut("Delete")
         a.triggered.connect(self._remove_sel)
@@ -412,48 +413,41 @@ class AvMainWindow(QMainWindow):
         self.hint.setGeometry(0, 0, vp.width(), vp.height())
         self.hint.setVisible(self.table.rowCount() == 0)
 
+    def _toggle_log(self, on):
+        self.logw.setVisible(on)
+        self.log_btn.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self.s.show_log = on
+
     # ---------------------------------------------------------------- 設定
     def _load(self):
-        s = self.s
-        quiet = (self.c_enc, self.c_q, self.c_speed, self.sp_w, self.sp_t, self.cb_tq)
+        quiet = (self.c_enc, self.c_q, self.c_speed, self.sp_q, self.sp_w, self.sp_t, self.cb_tq, self.sp_vmaf)
         for w in quiet:
             w.blockSignals(True)
         try:
-            self._load_values()
+            s = self.s
+            self.c_enc.setCurrentIndex(max(0, self.c_enc.findData(s.encoder)))
+            self.c_q.setCurrentIndex(max(0, self.c_q.findData(s.quality)))
+            self.c_speed.setCurrentIndex(max(0, self.c_speed.findData(s.speed)))
+            self.sp_w.setValue(int(s.workers or 0))
+            self.sp_t.setValue(int(s.threads or 0))
+            self.cb_tq.setChecked(s.target_quality)
+            self.sp_vmaf.setValue(float(s.target_vmaf))
+            self.sp_probes.setValue(int(s.target_probes))
+            self.sp_vmaf.setEnabled(s.target_quality)
+            self.sp_probes.setEnabled(s.target_quality)
+            self._cur_enc = s.encoder
+            self.ed_extra.setText((s.extra or {}).get(s.encoder, ""))
+            self.ed_path.setText((s.encoder_paths or {}).get(s.encoder, ""))
+            self._extra_placeholder()
+            self._apply_q_range()
+            self.out_edit.setText(s.output_dir)
+            self.log_btn.setChecked(s.show_log)
+            self._toggle_log(s.show_log)
         finally:
             for w in quiet:
                 w.blockSignals(False)
         self._update_auto()
         self._encoder_status()
-
-    def _load_values(self):
-        s = self.s
-        self.c_enc.setCurrentIndex(max(0, self.c_enc.findData(s.encoder)))
-        self.c_q.setCurrentIndex(max(0, self.c_q.findData(s.quality)))
-        self.c_speed.setCurrentIndex(max(0, self.c_speed.findData(s.speed)))
-        self._apply_q_range()
-        self.sp_w.setValue(int(s.workers or 0))
-        self.sp_t.setValue(int(s.threads or 0))
-        self.cb_tq.setChecked(s.target_quality)
-        self.sp_vmaf.setValue(float(s.target_vmaf))
-        self.sp_probes.setValue(int(s.target_probes))
-        self._tq_toggled(s.target_quality)
-        self._cur_enc = s.encoder
-        self.ed_extra.setText((s.extra or {}).get(s.encoder, ""))
-        self.ed_path.setText((s.encoder_paths or {}).get(s.encoder, ""))
-        self._extra_placeholder()
-        for k, val in (("content", s.default_content), ("res", s.default_res), ("crop", s.default_crop),
-                       ("audio", s.default_audio)):
-            self.defaults[k].setCurrentIndex(max(0, self.defaults[k].findData(val)))
-        self.c_chunk.setCurrentIndex(max(0, self.c_chunk.findData(s.chunk_method)))
-        self.c_sc.setCurrentIndex(max(0, self.c_sc.findData(s.sc_method)))
-        self.sp_maxsc.setValue(float(s.max_scene_sec))
-        self.sp_minsc.setValue(int(s.min_scene_len))
-        (self.rb_custom if s.output_dir else self.rb_same).setChecked(True)
-        self.out_edit.setText(s.output_dir)
-        self.suffix.setText(s.suffix)
-        self.tmp.setText(s.temp_dir)
-        self.cb_keep_tmp.setChecked(s.keep_temp)
 
     def _store_per_encoder(self):
         enc = self._cur_enc
@@ -473,18 +467,7 @@ class AvMainWindow(QMainWindow):
         s.target_quality = self.cb_tq.isChecked()
         s.target_vmaf = self.sp_vmaf.value()
         s.target_probes = self.sp_probes.value()
-        s.default_content = self.defaults["content"].currentData()
-        s.default_res = self.defaults["res"].currentData()
-        s.default_crop = self.defaults["crop"].currentData()
-        s.default_audio = self.defaults["audio"].currentData()
-        s.chunk_method = self.c_chunk.currentData()
-        s.sc_method = self.c_sc.currentData()
-        s.max_scene_sec = self.sp_maxsc.value()
-        s.min_scene_len = self.sp_minsc.value()
-        s.output_dir = self.out_edit.text().strip() if self.rb_custom.isChecked() else ""
-        s.suffix = self.suffix.text().strip()
-        s.temp_dir = self.tmp.text().strip()
-        s.keep_temp = self.cb_keep_tmp.isChecked()
+        s.output_dir = self.out_edit.text().strip().strip('"')
         s.save()
 
     def _extra_placeholder(self):
@@ -493,6 +476,20 @@ class AvMainWindow(QMainWindow):
         self.ed_extra.setPlaceholderText(f"{E.ENCODER_LABELS[self.s.encoder].split('（')[0]} の書き方。"
                                          f"{ex.get(self.s.encoder, '')}　空欄 = 種類ごとの既定のまま")
 
+    def _tq_toggled(self, *_):
+        on = self.cb_tq.isChecked()
+        self.sp_vmaf.setEnabled(on)
+        self.sp_probes.setEnabled(on)
+        self.s.target_quality = on
+        self.s.target_vmaf = self.sp_vmaf.value()
+        self._apply_q_range()
+        self._refresh_rows()
+
+    def _par_changed(self):
+        self.s.workers = self.sp_w.value()
+        self.s.threads = self.sp_t.value()
+        self._update_auto()
+
     def _apply_q_range(self):
         enc = self.s.encoder
         lo, hi = E.QUALITY[enc][3]
@@ -500,21 +497,24 @@ class AvMainWindow(QMainWindow):
         self.sp_q.setRange(lo, hi)
         self.sp_q.setValue(self.s.quality_value())
         self.sp_q.blockSignals(False)
-        self.sp_q.setEnabled(self.s.quality == "custom")
-        self.lb_qname.setText(E.QUALITY[enc][4])
+        tq = self.s.target_quality
+        self.c_q.setEnabled(not tq)
+        self.sp_q.setEnabled(not tq and self.s.quality == "custom")
+        self.lb_qname.setText(f"目標 VMAF {self.s.target_vmaf:g}" if tq else E.QUALITY[enc][4])
+        self.c_q.setToolTip("目標画質（VMAF）を使っています。設定の「エンコード」で切り替えます" if tq else TIPS["quality"])
 
     def _enc_changed(self):
         self._store_per_encoder()
         self.s.encoder = self.c_enc.currentData()
         self._cur_enc = self.s.encoder
-        if self.s.quality == "custom":
-            self.s.custom_q = E.QUALITY[self.s.encoder][1]
-        self._apply_q_range()
         self.ed_extra.setText((self.s.extra or {}).get(self.s.encoder, ""))
         self.ed_path.setText((self.s.encoder_paths or {}).get(self.s.encoder, ""))
         self._extra_placeholder()
-        self._update_auto()
         self._encoder_status()
+        if self.s.quality == "custom":
+            self.s.custom_q = E.QUALITY[self.s.encoder][1]
+        self._apply_q_range()
+        self._update_auto()
         self._refresh_rows()
 
     def _q_changed(self):
@@ -522,41 +522,22 @@ class AvMainWindow(QMainWindow):
         self._apply_q_range()
         self._refresh_rows()
 
-    def _tq_toggled(self, on):
-        self.sp_vmaf.setEnabled(on)
-        self.sp_probes.setEnabled(on)
-        self.c_q.setEnabled(not on)
-        self.sp_q.setEnabled(not on and self.s.quality == "custom")
-        self.s.target_quality = on
-        self._refresh_rows()
-
-    def _max_width(self) -> int:
-        ws = [r.info.video.width for r in self.rows.values() if r.info and r.info.video]
-        return max(ws) if ws else 3840
-
     def _update_auto(self):
-        profiles = (self.s.worker_profiles or {}).get(self.s.encoder)
-        parts = []
+        """メイン画面に出していない設定の要約（並列数・分割・追加時の既定）"""
+        s = self.s
+        profiles = (s.worker_profiles or {}).get(s.encoder)
+        par = []
         for rc, width in (("4k", 3840), ("hd", 1920)):
-            w, t, how = A.resolve_workers(self.s.encoder, width, self.sp_w.value(), self.sp_t.value(), profiles)
-            lp = f"・--lp {A.svt_lp(t)}" if self.s.encoder == "svt-av1" else ""
-            parts.append(f"{A.RES_CLASS_LABELS[rc]} {w} 本 × {t}{lp}（{how}）")
-        self.lb_auto.setText("→ " + "　".join(parts) + f"　｜ CPU {A.cpu_count()} / メモリ {A.total_memory_gb():.0f} GB")
-
-    def _assist(self):
-        from shared.gui.worker_assist import WorkerAssist
-        w = WorkerAssist(self, {k: v for k, v in E.ENCODER_LABELS.items()}, self.s.encoder, self.s.assist_answers)
-        if w.exec():
-            self.s.worker_profiles = w.profiles
-            self.s.assist_answers = w.answers
-            # アシストの値を使うため、手動の指定は「自動」に戻す
-            self.sp_w.setValue(0)
-            self.sp_t.setValue(0)
-            self._save()
-            self._update_auto()
-            cur = w.profiles.get(self.s.encoder, {})
-            self.logw.appendPlainText("並列数アシスト: " + "、".join(
-                f"{A.RES_CLASS_LABELS[rc]} {v['workers']} 本 × {v['threads']} スレッド" for rc, v in cur.items()))
+            w, t, how = A.resolve_workers(s.encoder, width, s.workers, s.threads, profiles)
+            lp = f"・--lp {A.svt_lp(t)}" if s.encoder == "svt-av1" else ""
+            par.append(f"{A.RES_CLASS_LABELS[rc]} {w} 本 × {t}{lp}（{how}）")
+        self.lb_par.setText("→ " + "　".join(par) + f"　｜ CPU {A.cpu_count()} / メモリ {A.total_memory_gb():.0f} GB")
+        split = SPLIT_LABELS.get(s.split, s.split).split("（")[0]
+        if s.split == "manual":
+            split = f"最大 {s.max_scene_sec:g} 秒・最小 {s.min_scene_len} フレーム"
+        defaults = "・".join(str(ROW_LABELS[k].get(getattr(s, DEFAULT_OF[k]), "")).split("（")[0] for k in PER_ROW)
+        self.lb_auto.setText(f"分割: {split}　｜　追加時の既定: {defaults}"
+                             f"　｜　作業フォルダ: {s.temp_dir or '保存先'}")
 
     def _encoder_status(self):
         ok, msg = A.encoder_status(self.s.encoder, self.ed_path.text().strip().strip('"'))
@@ -593,30 +574,49 @@ class AvMainWindow(QMainWindow):
         self.env_chip.style().polish(self.env_chip)
         return not bad
 
-    def _open_settings(self):
+    def _open_settings(self, tab: str = ""):
+        self._save()
+
         def extra():
             lines = []
             for k in E.ENCODERS:
                 ok, msg = A.encoder_status(k, (self.s.encoder_paths or {}).get(k, ""))
                 lines.append(f"{E.ENCODER_LABELS[k].split('（')[0]}: {'使用可' if ok else '使用不可'}（{msg}）")
             return lines
-        d = SettingsDialog(self.s, self, tool_list=TOOL_LIST, tips=TIPS, extra_status=extra)
+
+        d = SettingsDialog(self.s, self, tool_list=TOOL_LIST, tips=TIPS, extra_status=extra, sections=SECTIONS,
+                           client=self.client, tab=tab if self._refresh_env() else "tools")
         d.changed.connect(self._refresh_env)
         d.exec()
+        self._load()
         self._refresh_env()
-        self._encoder_status()
+        self._refresh_rows()
         for rid, r in self.rows.items():
             if r.info is None and r.state == ST_ERROR:
                 self._probe(rid)
 
-    def _browse(self, edit, rb):
-        d = QFileDialog.getExistingDirectory(self, "フォルダを選択", edit.text() or self.s.recent_dir or str(Path.home()))
-        if d:
-            edit.setText(str(Path(d)))
-            if rb:
-                rb.setChecked(True)
+    def _assist(self, parent):
+        from shared.gui.worker_assist import WorkerAssist
+        w = WorkerAssist(parent, dict(E.ENCODER_LABELS), self.s.encoder, self.s.assist_answers)
+        if not w.exec():
+            return
+        self.s.worker_profiles = w.profiles
+        self.s.assist_answers = w.answers
+        # アシストの値を使うため、手動の指定は「自動」に戻す
+        self.sp_w.setValue(0)
+        self.sp_t.setValue(0)
+        self._save()
+        self._update_auto()
+        cur = w.profiles.get(self.s.encoder, {})
+        self.logw.appendPlainText("並列数アシスト: " + "、".join(
+            f"{A.RES_CLASS_LABELS[rc]} {v['workers']} 本 × {v['threads']} スレッド" for rc, v in cur.items()))
 
-    # ---------------------------------------------------------------- キュー
+    def _browse_out(self):
+        d = QFileDialog.getExistingDirectory(self, "保存先", self.out_edit.text() or self.s.recent_dir or str(Path.home()))
+        if d:
+            self.out_edit.setText(str(Path(d)))
+
+    # ---------------------------------------------------------------- 一覧
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
@@ -672,7 +672,7 @@ class AvMainWindow(QMainWindow):
         row.w = {"vinfo": vinfo, "status": st, "prog": pb}
         cols = {"content": COL_CONTENT, "res": COL_RES, "crop": COL_CROP, "audio": COL_AUDIO}
         for k in PER_ROW:
-            cb = combo(ROW_LABELS[k], (options or {}).get(k, self.defaults[k].currentData()))
+            cb = combo(ROW_LABELS[k], (options or {}).get(k, getattr(self.s, DEFAULT_OF[k])))
             cb.setToolTip(TIPS[k])
             cb.currentIndexChanged.connect(lambda _=0, rid=rid: self._update(rid))
             row.w[k] = cb
@@ -687,7 +687,7 @@ class AvMainWindow(QMainWindow):
         row = self.rows[rid]
         if not ffprobe:
             if not row.jid:
-                self._set(rid, ST_ERROR, "ffprobe がありません（環境設定でセットアップしてください）")
+                self._set(rid, ST_ERROR, "ffprobe がありません（設定の「外部ツール」でセットアップしてください）")
             return
         if not row.jid:
             self._set(rid, ST_PROBING)
@@ -717,7 +717,6 @@ class AvMainWindow(QMainWindow):
         row.w["vinfo"].setToolTip(info.video.detail())
         row.state = ST_READY
         self._update(rid)
-        self._update_auto()
 
     def _job(self, row) -> AvJob:
         return AvJob(row.path, content=row.w["content"].currentData(), res=row.w["res"].currentData(),
@@ -732,6 +731,8 @@ class AvMainWindow(QMainWindow):
         if not row or not row.info or row.state not in (ST_READY, ST_ERROR) or not row.info.video:
             return
         self.s.speed = self.c_speed.currentData() or self.s.speed
+        if self.s.quality == "custom":
+            self.s.custom_q = self.sp_q.value()
         short, detail = describe_plan(row.info, self._job(row), self.s)
         self._set(rid, ST_READY)
         row.w["status"].setText(f"待機 → {short}")
@@ -758,6 +759,26 @@ class AvMainWindow(QMainWindow):
     def _ids_sel(self):
         return [self.table.item(r, COL_FILE).data(Qt.UserRole) for r in sorted({i.row() for i in self.table.selectedIndexes()})]
 
+    def _row_menu(self, pos):
+        """右クリック: 選んだ行（未選択なら全部）の種類・解像度・黒帯・音声をまとめて変える"""
+        ids = self._ids_sel() or list(self.rows)
+        if not ids:
+            return
+        m = QMenu(self)
+        for k in PER_ROW:
+            sub = m.addMenu(PER_ROW_NAMES[k])
+            for val, label in ROW_LABELS[k].items():
+                sub.addAction(label).triggered.connect(lambda _=False, k=k, val=val: self._apply_bulk(ids, k, val))
+        m.addSeparator()
+        m.addAction("選択を削除").triggered.connect(self._remove_sel)
+        m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _apply_bulk(self, ids, key, value):
+        for rid in ids:
+            w = self.rows[rid].w[key] if rid in self.rows else None
+            if w is not None and w.isEnabled():
+                w.setCurrentIndex(max(0, w.findData(value)))
+
     def _drop_rows(self, ids):
         for rid in ids:
             for r in range(self.table.rowCount()):
@@ -766,7 +787,6 @@ class AvMainWindow(QMainWindow):
                     break
             self.rows.pop(rid, None)
         self._hint()
-        self._update_auto()
 
     def _remove_ids(self, ids):
         """表から消す。キューに送ったものはサーバーからも消す（Web 画面からも消える）。処理中のものは消さない"""
@@ -790,13 +810,6 @@ class AvMainWindow(QMainWindow):
     def _clear_done(self):
         self._remove_ids([k for k, r in self.rows.items() if r.state == ST_DONE])
 
-    def _apply_bulk(self):
-        for rid in self._ids_sel() or list(self.rows):
-            w = self.rows[rid].w
-            for k in PER_ROW:
-                if w[k].isEnabled():
-                    w[k].setCurrentIndex(max(0, w[k].findData(self.bulk[k].currentData())))
-
     # ---------------------------------------------------------------- 実行（サーバーのキュー）
     def _opts(self, row) -> dict:
         return {k: row.w[k].currentData() for k in PER_ROW}
@@ -804,15 +817,13 @@ class AvMainWindow(QMainWindow):
     def _start(self):
         self._save()
         if not self._refresh_env():
-            QMessageBox.warning(self, APP_NAME, "必要なツールが揃っていません。環境設定でセットアップしてください。")
-            self._open_settings()
+            QMessageBox.warning(self, APP_NAME, "必要なツールが揃っていません。設定の「外部ツール」でセットアップしてください。")
+            self._open_settings("tools")
             return
         if not self._encoder_status() and not (A.IS_WIN and self.s.encoder in A.EXTRA_ENCODERS
                                                and not self.ed_path.text().strip()):
-            QMessageBox.warning(self, APP_NAME, f"{E.ENCODER_LABELS[self.s.encoder]} が使えません。環境設定でセットアップしてください。")
-            return
-        if self.rb_custom.isChecked() and not self.out_edit.text().strip():
-            QMessageBox.warning(self, APP_NAME, "保存先フォルダを指定してください。")
+            QMessageBox.warning(self, APP_NAME, f"{E.ENCODER_LABELS[self.s.encoder]} が使えません。"
+                                                "設定の「外部ツール」でセットアップしてください。")
             return
         targets = []
         for r in range(self.table.rowCount()):
@@ -856,6 +867,26 @@ class AvMainWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
         self.cur.setText("停止中…（途中までの分は残ります。もう一度開始すると続きから再開します）")
 
+    def _after_changed(self):
+        self._set_after(self.c_after.currentData())
+
+    def _set_after(self, action):
+        self._after_touched = time.time()
+        try:
+            self._after_info = self.client.set_after(action)
+        except ServerError as e:
+            self.cur.setText(str(e))
+            return
+        self._show_after()
+
+    def _show_after(self):
+        a = self._after_info or {}
+        if a and time.time() - self._after_touched > 2:      # 自分で変えた直後は、古い状態で戻さない
+            self.c_after.blockSignals(True)
+            self.c_after.setCurrentIndex(max(0, self.c_after.findData(a.get("action", power.NONE))))
+            self.c_after.blockSignals(False)
+        self.btn_after_cancel.setVisible(bool(a.get("seconds")))
+
     def _poll(self):
         if self._polling:
             return
@@ -883,6 +914,8 @@ class AvMainWindow(QMainWindow):
                         self._update(rid)
             self.log_pos.clear()
         self._inst = st.get("instance")
+        self._after_info = st.get("after") or {}
+        self._show_after()
         jobs = [j for j in st["jobs"] if j["kind"] == KIND]
         byid = {j["id"]: j for j in jobs}
         by_jid = {r.jid: rid for rid, r in self.rows.items() if r.jid}
@@ -922,6 +955,10 @@ class AvMainWindow(QMainWindow):
             self._stopping = False
         self.btn_stop.setEnabled(bool(active) and not self._stopping)
         self.total.setValue(int((fin + (run["progress"] if run else 0)) / n * 1000) if n else 0)
+        a = self._after_info or {}
+        if a.get("seconds"):
+            self.cur.setText(f"すべて終わりました。あと {a['seconds']} 秒で{a['label']}します（取り消せます）")
+            return
         if self._stopping:
             return
         if run:
@@ -931,9 +968,10 @@ class AvMainWindow(QMainWindow):
         elif n:
             ok = sum(1 for j in jobs if j["state"] == "done")
             ng = sum(1 for j in jobs if j["state"] == "failed")
-            self.cur.setText(f"終了: 成功 {ok} / 失敗 {ng} / 全 {n}")
+            extra = f"（{a['message']}）" if a.get("message") else ""
+            self.cur.setText(f"終了: 成功 {ok} / 失敗 {ng} / 全 {n}{extra}")
         else:
-            self.cur.setText("")
+            self.cur.setText(a.get("message", ""))
 
     def closeEvent(self, e):
         if any(r.jid and r.state in (ST_QUEUED, ST_RUNNING) for r in self.rows.values()):

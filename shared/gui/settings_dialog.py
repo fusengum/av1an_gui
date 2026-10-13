@@ -1,11 +1,11 @@
-"""環境設定（外部ツールの検出と自動ダウンロード、ツールごとのフォルダ指定）"""
+"""設定画面（タブ: ツールごとの設定ページ / Web 画面 / 外部ツールの検出と自動ダウンロード・フォルダ指定）"""
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-                               QProgressBar, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+                               QLineEdit, QMessageBox, QProgressBar, QPushButton, QTabWidget, QVBoxLayout, QWidget)
 
 from shared.core import tools
 from shared.core.config import EXE
@@ -45,22 +45,50 @@ class SettingsDialog(QDialog):
     changed = Signal()
 
     def __init__(self, settings, parent=None, tool_list=None, tips: dict | None = None, extra_status=None,
-                 folders: list[dict] | None = None):
+                 folders: list[dict] | None = None, sections: list[dict] | None = None, actions: dict | None = None,
+                 section_extra=None, client=None, tab: str = ""):
         """tool_list: tools.check_all 形式のツール一覧。extra_status: 追加表示する行（文字列リスト）を返す関数
         folders: 手動で指定するフォルダ（自動取得できないツールなど）の定義
             {"key": 設定名, "title": 見出し, "tip": 説明, "placeholder": 例, "note": 補足,
-             "status": (settings) -> (ok: bool, 説明)}"""
+             "status": (settings) -> (ok: bool, 説明)}
+        sections: 設定ページの定義（WebApp.settings_sections と同じ形式）。ページごとにタブを作る
+        actions: ページのボタンの id → 処理。section_extra: (ページ id) -> ページの下に足すウィジェット or None
+        client: shared.web.client.Client。渡すと「Web 画面」タブを出す。tab: 最初に開くタブの id"""
         super().__init__(parent)
         self.s = settings
         self.tool_list = tool_list or []
         self.folders = folders or []
         self.tips = {**TIPS, **(tips or {})}
         self.extra_status = extra_status
-        self.setWindowTitle("環境設定")
-        self.resize(820, 420 + 130 * len(self.folders))
+        self.setWindowTitle("設定")
+        self.resize(860, 600 + 100 * len(self.folders))
         self._thread: QThread | None = None
+        self.client = client
+        self.pages = []
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        outer.addWidget(self.tabs, 1)
+        from .settings_form import SchemaPage
+        for sec in sections or []:
+            if not [f for f in sec.get("fields", []) if not f.get("main")]:
+                continue                          # 全部メイン画面にある
+            page = SchemaPage(sec, settings, self.tips, actions,
+                              section_extra(sec["id"]) if section_extra else None)
+            self.pages.append(page)
+            self.tabs.addTab(page, sec["title"])
+            page.setObjectName(sec["id"])
+        self.web_page = None
+        if client is not None:
+            from .web_page import WebPage
+            self.web_page = WebPage()
+            self.web_page.setObjectName("web")
+            self.tabs.addTab(self.web_page, "Web 画面")
+
+        tools_page = QWidget()
+        tools_page.setObjectName("tools")
+        self.tabs.addTab(tools_page, "外部ツール")
+        root = QVBoxLayout(tools_page)
 
         # 手動で指定するフォルダ
         self.folder_rows = []
@@ -135,14 +163,50 @@ class SettingsDialog(QDialog):
         root.addWidget(loc)
         root.addStretch(1)
 
-        close = QPushButton("閉じる")
-        close.clicked.connect(self.accept)
         h = QHBoxLayout()
         h.addStretch(1)
-        h.addWidget(close)
-        root.addLayout(h)
+        if self.pages or self.web_page:
+            cancel = QPushButton("キャンセル")
+            cancel.clicked.connect(self.reject)
+            ok = QPushButton("保存")
+            ok.setObjectName("primary")
+            ok.clicked.connect(self._save)
+            h.addWidget(cancel)
+            h.addWidget(ok)
+        else:
+            close = QPushButton("閉じる")
+            close.clicked.connect(self.accept)
+            h.addWidget(close)
+        outer.addLayout(h)
+        for i in range(self.tabs.count()):
+            if tab and self.tabs.widget(i).objectName() == tab:
+                self.tabs.setCurrentIndex(i)
 
         self.refresh()
+
+    def _save(self):
+        if self.web_page and self.web_page.needs_restart() and self.client:
+            try:
+                busy = any(j["state"] in ("queued", "running") for j in self.client.state()["jobs"])
+            except Exception:  # noqa: BLE001  サーバーが動いていなければ、そのまま反映できる
+                busy = False
+            if busy:
+                QMessageBox.warning(self, "設定", "エンコード中（または待機中）のジョブがあるため、Web 画面の待ち受けを"
+                                                "変えられません。終わってから、もう一度保存してください。")
+                self.tabs.setCurrentWidget(self.web_page)
+                return
+        for p in self.pages:
+            p.apply()
+        self.s.save()
+        if self.web_page:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                msgs = self.web_page.apply(self.client)
+            finally:
+                QApplication.restoreOverrideCursor()
+            if msgs:
+                QMessageBox.information(self, "設定", "\n".join(msgs))
+        self.accept()
 
     # ------------------------------------------------------------------
     def refresh(self):

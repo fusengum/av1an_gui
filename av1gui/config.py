@@ -36,6 +36,7 @@ class AvSettings:
     target_probes: int = 4
 
     # 分割
+    split: str = "auto"              # auto | short | standard | long | manual（manual のときだけ下の 2 つを使う）
     chunk_method: str = "auto"       # auto | hybrid | segment | lsmash | ffms2 | bestsource
     sc_method: str = "standard"      # standard | fast
     max_scene_sec: float = 10.0      # 1 チャンクの最大秒数（av1an の --extra-split-sec）
@@ -49,6 +50,7 @@ class AvSettings:
 
     window_geometry: str = ""
     recent_dir: str = ""
+    show_log: bool = False
 
     @classmethod
     def load(cls) -> "AvSettings":
@@ -60,6 +62,10 @@ class AvSettings:
                 for k, v in data.items():
                     if k in names:
                         setattr(s, k, v)
+                if "split" not in data:
+                    # 以前の版: 既定（10 秒・24 フレーム）のままなら自動に、変えていたら手動のまま使う
+                    changed = float(data.get("max_scene_sec", 10)) != 10 or int(data.get("min_scene_len", 24)) != 24
+                    s.split = "manual" if changed else "auto"
             except Exception:
                 pass
         return s

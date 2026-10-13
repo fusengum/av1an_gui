@@ -35,7 +35,18 @@ class WebApp:
     extra_meta: dict = field(default_factory=dict)
     media_exts: tuple = ()               # ファイル一覧に出す追加の拡張子
     job_defaults: Callable | None = None
-    assist_encoders: dict = field(default_factory=dict)  # 並列数アシストの対象（エンコーダ → 表示名）。空なら使わない # () -> {key: 既定値}（設定の「新規追加時の既定」）
+    assist_encoders: dict = field(default_factory=dict)  # 並列数アシストの対象（エンコーダ → 表示名）。空なら使わない
+    # 見出し付きの設定（デスクトップ版の設定画面と Web 画面の設定タブで共通）。空なら settings_fields を 1 つにまとめる
+    #   [{"id", "title", "note", "fields": [{"key", "label", "type", "hint", "tip", "choices", "min", "max",
+    #     "step", "suffix", "placeholder", "show_if": {key: 値 or [値]}, "main": bool, "advanced": bool}]}]
+    #   key の {encoder} などは、同じ設定のその項目の値に置き換える（extra.{encoder} → extra.x265）
+    settings_sections: list = field(default_factory=list)
+
+    def sections(self) -> list[dict]:
+        if self.settings_sections:
+            return self.settings_sections
+        fs = [{"key": f[0], "label": f[1], "type": f[2], "tip": f[3], "choices": f[4]} for f in self.settings_fields]
+        return [{"id": "main", "title": "設定", "note": self.settings_note, "fields": fs}] if fs else []
 
     def option_text(self, options: dict) -> str:
         parts = []

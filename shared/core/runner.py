@@ -208,7 +208,7 @@ def ascii_work_root(preferred: Path, log: LogCB) -> Path:
                 return cand
             except OSError:
                 continue
-    raise JobError("英数字のみの作業フォルダを用意できません。環境設定で作業フォルダを指定してください")
+    raise JobError("英数字のみの作業フォルダを用意できません。設定の「一般」で作業フォルダを指定してください")
 
 
 def unique_path(p: Path) -> Path:

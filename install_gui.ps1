@@ -235,15 +235,16 @@ $cardWeb.Controls.Add($cbWeb)
 $cardWeb.Controls.Add((New-Label 'ポート' 36 44 60 22))
 $nuPort = New-Object System.Windows.Forms.NumericUpDown
 $nuPort.Minimum = 1024; $nuPort.Maximum = 65535
-# 既定のポート: このツールの Web 画面を登録済みならそのポート。無ければ 8765 から空いている番号（別のツールの Web 画面とぶつけない）
+# 既定のポート: Web 画面の設定（settings_web.json）か登録済みの自動起動のポート。無ければ 8765 から空いている番号（別のツールの Web 画面とぶつけない）
 function Test-PortFree([int]$p) {
     try { $l = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any, $p); $l.Start(); $l.Stop(); return $true } catch { return $false }
 }
 $defPort = 0
-try {
+try { $sw = Join-Path $App 'settings_web.json'; if (Test-Path $sw) { $p0 = (Get-Content $sw -Raw -Encoding UTF8 | ConvertFrom-Json).port; if ($p0) { $defPort = [int]$p0 } } } catch {}
+if (-not $defPort) { try {
     $tk = Get-ScheduledTask -TaskName $WebName -ErrorAction Stop
     if ("$($tk.Actions[0].Arguments)" -match '--port\s+(\d+)') { $defPort = [int]$Matches[1] }
-} catch {}
+} catch {} }
 if (-not $defPort) {
     $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) "$WebName.lnk"
     if (Test-Path $lnk) { try { $a0 = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).Arguments; if ($a0 -match '--port\s+(\d+)') { $defPort = [int]$Matches[1] } } catch {} }

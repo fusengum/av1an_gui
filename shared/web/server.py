@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from shared import app_name, apps, tool_list
 from shared.settings import tool_settings
+from shared.core import power
 from shared.core import probe as P
 from shared.core import tools
 from shared.core.config import APP_ROOT, IS_WIN
@@ -68,7 +69,26 @@ class JobQueue:
         self.order: list[str] = []
         self.lock = threading.Lock()
         self.wake = threading.Event()
+        # すべて終わった後の電源操作。「すべて中止」や、最後のジョブが中止で終わったときは行わない
+        self.after = power.NONE
+        self.after_at = 0.0           # 実行する時刻（猶予中だけ 0 以外）
+        self.after_msg = ""
+        self._ran = False             # 前回キューが空になってから、中止以外で終わったジョブがある
         threading.Thread(target=self._loop, daemon=True).start()
+
+    def set_after(self, action: str):
+        if action not in power.LABELS:
+            raise ValueError(action)
+        self.after, self.after_at, self.after_msg = action, 0.0, ""
+        self.wake.set()
+
+    def disarm(self):
+        self.after, self.after_at, self._ran = power.NONE, 0.0, False
+
+    def after_state(self) -> dict:
+        rest = max(0, int(self.after_at - time.time())) if self.after_at else 0
+        return {"action": self.after, "label": power.LABELS[self.after], "seconds": rest, "message": self.after_msg,
+                "choices": power.LABELS}
 
     def add(self, kind: str, path: str, options: dict) -> WebJob:
         j = WebJob(id=uuid.uuid4().hex[:10], kind=kind, path=path, options=options)
@@ -99,11 +119,29 @@ class JobQueue:
     def _loop(self):
         while True:
             j = self._next()
-            if j is None:
-                self.wake.wait(2)
-                self.wake.clear()
+            if j is not None:
+                self.after_at = 0.0               # 猶予中に追加されたら、それが終わるまで待つ
+                self._run(j)
+                self._ran = j.state != "cancelled"
                 continue
-            self._run(j)
+            if self.after == power.NONE:
+                self._ran = False                 # 何もせず待っている間に選んでも、すぐには実行しない
+            elif self._ran:
+                if not self.after_at:
+                    self.after_at = time.time() + power.GRACE_SEC
+                elif time.time() >= self.after_at:
+                    self._power()
+            self.wake.wait(1)
+            self.wake.clear()
+
+    def _power(self):
+        action = self.after
+        self.disarm()
+        self.after_msg = f"{power.LABELS[action]}を実行しました（{time.strftime('%H:%M')}）"
+        try:
+            power.execute(action)
+        except Exception as e:  # noqa: BLE001
+            self.after_msg = str(e)
 
     def _run(self, j: WebJob):
         if j.cancel.is_set():                 # 取り出した直後に中止された
@@ -221,13 +259,14 @@ def meta():
         "apps": [{"id": a.id, "name": a.name, "desc": a.desc, "job_fields": a.job_fields,
                   "job_defaults": (a.job_defaults() if a.job_defaults else {}), "assist": bool(a.assist_encoders),
                   "settings_fields": a.settings_fields, "settings_note": a.settings_note, "tips": a.tips,
+                  "settings_sections": a.sections(),
                   **a.extra_meta} for a in load_apps().values()],
     }
 
 
 @app.get("/api/state")
 def state():
-    return {"instance": INSTANCE, "jobs": [j.summary() for j in Q.list()],
+    return {"instance": INSTANCE, "jobs": [j.summary() for j in Q.list()], "after": Q.after_state(),
             "env": {"running": ENV.running, "message": ENV.message, "progress": ENV.progress, "error": ENV.error}}
 
 
@@ -290,6 +329,7 @@ def retry(jid: str, req: RetryReq | None = None):
 @app.post("/api/jobs/stop")
 def stop_all():
     """待機中をすべて中止してから、処理中のものを止める（先に止めると次の待機が始まってしまう）"""
+    Q.disarm()                              # 強制的に止めたときは、終わった後の電源操作をしない
     jobs = Q.list()
     for j in jobs:
         if j.state == "queued":
@@ -304,6 +344,54 @@ def stop_all():
 @app.delete("/api/jobs/{jid}")
 def delete(jid: str):
     Q.remove(jid)
+    return {"ok": True}
+
+
+class AfterReq(BaseModel):
+    action: str
+
+
+@app.post("/api/after")
+def set_after(req: AfterReq):
+    """すべて終わった後の電源操作（none / sleep / hibernate / shutdown）。猶予中に none にすると取り消し"""
+    try:
+        Q.set_after(req.action)
+    except ValueError:
+        raise HTTPException(400, "操作の指定が不正です")
+    return Q.after_state()
+
+
+@app.get("/api/web")
+def web_settings():
+    """Web 画面の設定（変更はデスクトップ版から。管理者の確認や自動起動の登録がこの PC の画面で必要なため）"""
+    from .config import WebConfig, service_name, web_name
+    c = WebConfig.load()
+    return {"lan": c.lan, "port": c.port, "autostart": c.autostart, "name": web_name(), "service": service_name(),
+            "is_win": IS_WIN}
+
+
+@app.post("/api/server/restart")
+def restart_server():
+    """設定を読み直すために起動し直す。エンコード中は断る（止まってしまうため）"""
+    if any(j.state in ("queued", "running") for j in Q.list()):
+        raise HTTPException(409, "エンコード中（または待機中）のジョブがあるため、再起動できません")
+
+    def later():
+        time.sleep(0.5)
+        if os.environ.get("INVOCATION_ID"):          # systemd: 異常終了扱いにすると自動で起動し直される
+            os._exit(3)
+        import subprocess
+        import sys
+        exe = sys.executable
+        kw = {"creationflags": 0x00000008 | 0x00000200} if IS_WIN else {"start_new_session": True}
+        logs = APP_ROOT / "logs"
+        logs.mkdir(exist_ok=True)
+        with open(logs / "web.log", "a", encoding="utf-8") as out:
+            subprocess.Popen([exe, "-m", "shared.web"], cwd=str(APP_ROOT), stdin=subprocess.DEVNULL, stdout=out,
+                             stderr=out, close_fds=True, **kw)
+        os._exit(0)
+
+    threading.Thread(target=later, daemon=True).start()
     return {"ok": True}
 
 

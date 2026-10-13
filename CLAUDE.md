@@ -20,6 +20,8 @@ Windows / Linux 対応。素の VM から Python 不要で全自動セットア�
   - `gui/worker_assist.py`: 並列数アシスト
   - `web/`: FastAPI + データ駆動の `static/index.html`。各アプリの `webapp.py` の `make()` が WebApp を返す
   - キューを持つのは Web サーバーだけ。デスクトップ版は `web/client.py` でサーバーにジョブを送り、`/api/state` を見て表示する（サーバーは `logs/web.json` にポートを書く。無ければデスクトップ版が起動する）
+  - 設定画面: 各アプリの `webapp.py` の `settings_sections`（見出し付きの項目定義）から、デスクトップ版（`gui/settings_form.py`）と Web 画面の設定タブの両方を作る。`main=True` はデスクトップ版ではメイン画面に置く項目
+  - Web サーバーの待ち受けは `settings_web.json`（`web/config.py`）。終わった後の電源操作は `core/power.py` をサーバーのキューが実行する
 - `av1gui/`: アプリ本体（`app.json`、`env.py`、`webapp.py`、`config.py`、`encode.py`、`encoders.py`、`gui/`）
 - インストーラー: `install.bat` → `install_gui.ps1`（WinForms）→ `install.ps1 -Gui` → `python -m shared setup --progress`。進捗行は `@@STEP id state label` / `@@PROG frac msg` / `@@INFO` / `@@DONE` / `@@FAIL`
 - Linux: `install.sh`（systemd の Web サービス、ランチャー）

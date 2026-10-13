@@ -33,6 +33,9 @@ CHUNK_LABELS = {"auto": "自動", "hybrid": "hybrid（追加の準備不要）",
                 "lsmash": "lsmash（要 VapourSynth プラグイン）", "ffms2": "ffms2（要 VapourSynth プラグイン）",
                 "bestsource": "bestsource（要 VapourSynth プラグイン）"}
 SC_LABELS = {"standard": "標準（正確）", "fast": "速い"}
+SPLIT_LABELS = {"auto": "自動（おすすめ）", "short": "短め（最大 5 秒。並列が効きやすい）", "standard": "標準（最大 10 秒）",
+                "long": "長め（最大 20 秒。容量が少し減る）", "manual": "手動で指定"}
+SPLIT_MAX_SEC = {"short": 5.0, "standard": 10.0, "long": 20.0}
 OPUS_KBPS = {1: 96, 2: 160, 6: 320, 8: 448}
 
 
@@ -79,6 +82,26 @@ def describe_plan(info: P.MediaInfo, job: AvJob, s: AvSettings) -> tuple[str, st
     return " ".join(p for p in parts if p), "\n".join(detail)
 
 
+def split_params(s: AvSettings, info: P.MediaInfo, workers: int) -> tuple[float, int, str]:
+    """分割の (最大秒数, 最小フレーム数, 説明)。
+    自動: 1 つ最大 10 秒を基本に、短い映像では分割数が並列数の 4 倍以上になるよう短くする（下限 2 秒）。
+    最小の長さは 1 秒分のフレーム数（短すぎる分割は切れ目の分だけ無駄が増えるため）"""
+    fps = P._frac(info.video.fps if info.video else "", 24.0) or 24.0
+    one_sec = max(12, min(120, round(fps)))
+    if s.split == "manual":
+        return float(s.max_scene_sec or 10), int(s.min_scene_len or one_sec), "手動"
+    if s.split in SPLIT_MAX_SEC:
+        mx = SPLIT_MAX_SEC[s.split]
+        how = SPLIT_LABELS[s.split].split("（")[0]
+    else:
+        mx = 10.0
+        if info.duration > 0 and workers > 0:
+            mx = max(2.0, min(10.0, round(info.duration / (workers * 4) * 2) / 2))
+        length = f"{info.duration / 60:.0f} 分" if info.duration >= 90 else f"{info.duration:.0f} 秒"
+        how = f"自動: 長さ {length}・並列 {workers} 本"
+    return mx, min(one_sec, max(1, int(mx * fps / 2))), how
+
+
 def build_video_params(s: AvSettings, v: P.VideoTrack, content: str, out_width: int, threads: int,
                        scaled: bool) -> tuple[list[str], str]:
     enc = s.encoder
@@ -99,13 +122,13 @@ class AvPipeline:
     def _tool(self, name):
         p = find_tool(name, self.s)
         if not p:
-            raise JobError(f"{name} が見つかりません（環境設定でセットアップしてください）")
+            raise JobError(f"{name} が見つかりません（設定の「外部ツール」でセットアップしてください。Web 画面では「環境」タブです）")
         return p
 
     def _check_encoder(self, log):
         ok, msg = A.status()
         if not ok:
-            raise JobError(f"av1an が使えません: {msg}（環境設定でセットアップしてください）")
+            raise JobError(f"av1an が使えません: {msg}（設定の「外部ツール」でセットアップしてください。Web 画面では「環境」タブです）")
         enc = self.s.encoder
         override = (self.s.encoder_paths or {}).get(enc, "")
         ok, msg = A.encoder_status(enc, override)
@@ -199,9 +222,11 @@ class AvPipeline:
         vid.unlink(missing_ok=True)
 
         chunk = s.chunk_method if s.chunk_method != "auto" else ("hybrid" if IS_WIN else "lsmash")
+        max_sec, min_len, split_how = split_params(s, info, workers)
+        log(f"分割: 1 つ最大 {max_sec:g} 秒・最小 {min_len} フレーム（{split_how}）")
         common = ["-e", s.encoder, "-c", "mkvmerge", "-w", str(workers), "--pix-format", "yuv420p10le",
                   "--audio-params=-an", "-y", "--keep", "--sc-method", s.sc_method,
-                  "--extra-split-sec", f"{s.max_scene_sec:g}", "--min-scene-len", str(s.min_scene_len),
+                  "--extra-split-sec", f"{max_sec:g}", "--min-scene-len", str(min_len),
                   "--video-params=" + " ".join(params)]
         if height > 1080 and not scale:
             common += ["--sc-downscale-height", "540"]

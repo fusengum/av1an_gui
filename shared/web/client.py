@@ -129,12 +129,12 @@ class Client:
         raise ServerError("Web サーバーを起動できませんでした（logs/web.log を確認してください）")
 
     def _spawn(self) -> None:
-        info = read_info()
-        # インストール時に登録した Web 画面（LAN 向け）があればその設定で、無ければこの PC の中だけで待ち受ける
-        host = info.get("host") or "127.0.0.1"
-        port = int(info.get("port") or 0)
-        if not port or _open(port):
-            port = next((p for p in PORTS if not _open(p)), PORTS[0])
+        from .config import WebConfig
+        # 待ち受けは Web 画面の設定（settings_web.json）に従う。そのポートを別のツールが使っていれば空きを探す
+        cfg = WebConfig.load()
+        args = []
+        if _open(cfg.port):
+            args = ["--port", str(next((p for p in PORTS if not _open(p)), PORTS[0]))]
         exe = Path(sys.executable)
         if IS_WIN and exe.name.lower() == "python.exe" and exe.with_name("pythonw.exe").exists():
             exe = exe.with_name("pythonw.exe")             # コンソール画面を出さない
@@ -143,7 +143,7 @@ class Client:
         out = open(logs / "web.log", "a", encoding="utf-8")
         kw = {"creationflags": 0x00000008 | 0x00000200} if IS_WIN else {"start_new_session": True}
         try:
-            subprocess.Popen([str(exe), "-m", "shared.web", "--host", host, "--port", str(port)], cwd=str(APP_ROOT),
+            subprocess.Popen([str(exe), "-m", "shared.web", *args], cwd=str(APP_ROOT),
                              stdin=subprocess.DEVNULL, stdout=out, stderr=out, close_fds=True, **kw)
         finally:
             out.close()
@@ -164,6 +164,25 @@ class Client:
 
     def stop_all(self) -> None:
         self.post("/api/jobs/stop")
+
+    def set_after(self, action: str) -> dict:
+        return self.post("/api/after", {"action": action})
+
+    def restart(self, wait: float = 25) -> None:
+        """設定を反映するためにサーバーを起動し直し、つながるまで待つ"""
+        old = self.get("/api/meta").get("instance")
+        self.post("/api/server/restart")
+        self.base = ""
+        end = time.time() + wait
+        while time.time() < end:
+            time.sleep(1)
+            try:
+                if self.find() and self.get("/api/meta", timeout=3).get("instance") != old:
+                    return
+            except ServerError:
+                pass
+            self.base = ""
+        raise ServerError("Web サーバーが起動し直しませんでした（logs/web.log を確認してください）")
 
     def log(self, jid: str, since: int) -> dict:
         return self.get(f"/api/jobs/{urllib.parse.quote(jid)}/log?since={since}")
