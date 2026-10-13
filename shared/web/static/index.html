@@ -119,10 +119,11 @@ details.adv{margin-top:8px} details.adv>summary{cursor:pointer;color:var(--muted
   </div>
   <div class="card">
     <div class="row" style="justify-content:space-between">
-      <h2 style="margin:0">ジョブ（上から順に 1 件ずつ処理）</h2>
+      <h2 style="margin:0">ジョブ（上から順に 1 件ずつ処理）<span id="qstate" class="small" style="margin-left:10px;font-weight:400"></span></h2>
       <div class="after"><span class="small muted" title="キューのファイルがすべて終わった後の動作です。実行の 60 秒前から取り消せます。すべて中止した場合や、最後のファイルを中止した場合は実行しません。デスクトップ版と共通です。">終わったら</span>
         <select id="after" onchange="setAfter(this.value)"></select>
-      <button class="d" id="stopall" style="display:none" onclick="if(confirm('待機中と処理中のジョブをすべて中止します。途中までの分は残り、再実行すると続きから再開します。'))api('/api/jobs/stop',{method:'POST'}).then(refresh)">すべて中止</button>
+      <button class="d" id="qstop" style="display:none" title="処理中のものは待機に戻ります。次に開始すると続きから再開します" onclick="api('/api/queue/stop',{method:'POST'}).then(refresh)">停止</button>
+      <button class="p" id="qstart" style="display:none" onclick="api('/api/queue/start',{method:'POST'}).then(refresh)">エンコード開始</button>
       <button class="b" onclick="api('/api/jobs/clear',{method:'POST'}).then(refresh)">終わったものを消去</button></div>
     </div>
     <table><thead><tr><th>ファイル</th><th>ツール</th><th>内容</th><th style="width:22%">進捗</th><th>状態</th><th></th></tr></thead>
@@ -193,7 +194,10 @@ const ST={queued:'待機',running:'処理中',done:'完了',failed:'失敗',canc
 async function refresh(){
   let s;try{s=await api('/api/state')}catch(e){return}
   const tb=$('jobs');$('nojobs').style.display=s.jobs.length?'none':'';
-  $('stopall').style.display=s.jobs.some(j=>['queued','running'].includes(j.state))?'':'none';
+  const act=!!(s.queue&&s.queue.active),wait=s.jobs.filter(j=>j.state==='queued').length;QACTIVE=act;
+  $('qstop').style.display=act?'':'none';$('qstart').style.display=!act&&wait?'':'none';
+  $('qstate').textContent=act?'処理中':(wait?`停止中（待機 ${wait} 件は「エンコード開始」で始まります）`:'');
+  $('qstate').style.color=act?'var(--run)':'var(--warn)';
   showAfter(s.after);
   tb.innerHTML=s.jobs.map(j=>`<tr>
     <td title="${esc(j.path)}">${esc(j.name)}${j.output?`<div class="small muted" title="${esc(j.output)}">→ ${esc(j.output.split(/[\\/]/).pop())}</div>`:''}</td>
@@ -207,7 +211,7 @@ async function refresh(){
       ${j.state!=='running'?`<button class="b" onclick="api('/api/jobs/${j.id}',{method:'DELETE'}).then(refresh)">削除</button>`:''}</td></tr>`).join('');
   if(curLog&&$('logdlg').open)pullLog();
 }
-let afterTouched=0;
+let afterTouched=0, QACTIVE=false;
 function showAfter(a){if(!a)return;const sel=$('after');
   if(!sel.options.length)opts(sel,a.choices);
   if(Date.now()-afterTouched>2000&&document.activeElement!==sel)sel.value=a.action;
@@ -240,7 +244,7 @@ async function addJobs(){
   if($('addfolder').checked&&FS.path){paths=[FS.path];rec=true}
   if(!paths.length){$('addmsg').textContent='ファイルを選んでください';return}
   const options={};$('opt-'+kind).querySelectorAll('[data-k]').forEach(el=>options[el.dataset.k]=el.value);
-  try{const r=await api('/api/jobs',{method:'POST',body:JSON.stringify({kind,paths,options,recursive:rec})});$('addmsg').textContent=`${r.added.length} 件をキューに追加しました`;setTimeout(()=>$('addmsg').textContent='',4000);selAll(false);$('addfolder').checked=false;refresh()}
+  try{const r=await api('/api/jobs',{method:'POST',body:JSON.stringify({kind,paths,options,recursive:rec})});$('addmsg').textContent=`${r.added.length} 件をキューに追加しました`+(QACTIVE?'':'（「エンコード開始」で始まります）');setTimeout(()=>$('addmsg').textContent='',4000);selAll(false);$('addfolder').checked=false;refresh()}
   catch(e){$('addmsg').textContent=e.message}
 }
 

@@ -1,6 +1,7 @@
 """av1an_gui メインウィンドウ
-キュー・進捗は Web 画面のサーバーが持つ（shared.web.client）。この画面で追加した行は「エンコード開始」で
-サーバーのキューに送られ、Web 画面から追加したものも含めて同じキューを表示する。
+キュー・進捗は Web 画面のサーバーが持つ（shared.web.client）。この画面で追加したファイルは、解析が終わった
+時点でサーバーのキューに入り、Web 画面から追加したものも含めて同じキューを表示する。キュー全体に「開始 / 停止」が
+あり、「エンコード開始」で上から順に処理する。
 メイン画面にはエンコードの設定（エンコーダ・画質・速度・並列数・目標画質・追加パラメータなど）と保存先・
 終わった後の動作を置き、追加時の既定・分割・作業フォルダなどは設定画面（settings_schema.SECTIONS）にまとめる。"""
 from __future__ import annotations
@@ -22,6 +23,7 @@ from shared.core import power
 from shared.core import probe as P
 from shared.core import tools
 from shared.gui.settings_dialog import SettingsDialog
+from shared.version import code_fingerprint
 from shared.web.client import Client, ServerError
 
 from .. import APP_NAME, __version__
@@ -53,6 +55,7 @@ class Row:
     output: Path | None = None
     w: dict = field(default_factory=dict)
     jid: str | None = None               # サーバーのジョブ ID（キューに送った後）
+    sent_opts: dict | None = None        # サーバーに送った選択肢
     sent: float = 0.0                    # キューに送った時刻（それより前に取った状態では上書きしない）
 
 
@@ -136,9 +139,15 @@ class AvMainWindow(QMainWindow):
         self._stopping = False
         self._after_touched = 0.0
         self._after_info = {}
+        self._active = False              # キューが開始中
+        self._restarting = False          # 古いサーバーを起動し直している
+        self._restart_failed = 0.0        # 起動し直しに失敗した時刻（失敗したときは少し待ってから試す）
+        self._my_code = code_fingerprint()
         self._cur_enc = self.s.encoder
         self.qsig = PollSig()
         self.qsig.done.connect(self._on_poll)
+        self.rsig = PollSig()
+        self.rsig.done.connect(self._on_restarted)
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1280, 780)
         self.setAcceptDrops(True)
@@ -715,6 +724,7 @@ class AvMainWindow(QMainWindow):
         self._show_vinfo(row)
         row.state = ST_READY
         self._update(rid)
+        self._send(rid)                   # 解析できたら、すぐキューに入れる（Web 画面にも出る）
 
     def _show_vinfo(self, row):
         info = row.info
@@ -731,14 +741,26 @@ class AvMainWindow(QMainWindow):
             self._update(rid)
 
     def _update(self, rid):
+        """行の選択肢や設定が変わった: 状態の説明を作り直す。キューで待機中なら、サーバーの選択肢も変える"""
         row = self.rows.get(rid)
-        if not row or not row.info or row.state not in (ST_READY, ST_ERROR) or not row.info.video:
+        if not row or not row.info or not row.info.video:
+            return
+        if row.state not in (ST_READY, ST_ERROR, ST_QUEUED):
             return
         self.s.speed = self.c_speed.currentData() or self.s.speed
         if self.s.quality == "custom":
             self.s.custom_q = self.sp_q.value()
         short, detail = describe_plan(row.info, self._job(row), self.s)
-        self._set(rid, ST_READY)
+        if row.jid and row.state == ST_QUEUED:
+            opts = self._opts(row)
+            if opts != row.sent_opts:
+                try:
+                    self.client.set_options(row.jid, opts)
+                    row.sent_opts = opts
+                except ServerError as e:
+                    self.cur.setText(str(e))
+        else:
+            self._set(rid, ST_READY)
         row.w["status"].setText(f"待機 → {short}")
         row.w["status"].setToolTip(detail)
 
@@ -756,7 +778,7 @@ class AvMainWindow(QMainWindow):
         st.setToolTip(msg or (str(row.output) if row.output else ""))
         if state == ST_DONE:
             row.w["prog"].setValue(1000)
-        editable = state in (ST_READY, ST_ERROR, ST_DONE, ST_FAILED, ST_CANCELLED)
+        editable = state in (ST_READY, ST_ERROR, ST_QUEUED, ST_DONE, ST_FAILED, ST_CANCELLED)
         for k in PER_ROW:
             row.w[k].setEnabled(editable)
 
@@ -818,7 +840,24 @@ class AvMainWindow(QMainWindow):
     def _opts(self, row) -> dict:
         return {k: row.w[k].currentData() for k in PER_ROW}
 
+    def _send(self, rid) -> bool:
+        """解析できた行をキューに入れる。サーバーにつながらなければ手元に置き、つながったら送る"""
+        row = self.rows.get(rid)
+        if not row or row.jid or row.state != ST_READY or not row.info:
+            return False
+        try:
+            row.jid = self.client.add(KIND, row.path, self._opts(row))
+        except ServerError:
+            return False
+        row.sent_opts = self._opts(row)
+        self.log_pos[row.jid] = 0
+        row.sent = time.time()
+        self._set(rid, ST_QUEUED)
+        self._update(rid)
+        return True
+
     def _start(self):
+        """キューを開始する。失敗・中止した行は今の選択肢でやり直す"""
         self._save()
         if not self._refresh_env():
             QMessageBox.warning(self, APP_NAME, "必要なツールが揃っていません。設定の「外部ツール」でセットアップしてください。")
@@ -829,47 +868,47 @@ class AvMainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, f"{E.ENCODER_LABELS[self.s.encoder]} が使えません。"
                                                 "設定の「外部ツール」でセットアップしてください。")
             return
-        targets = []
-        for r in range(self.table.rowCount()):
-            rid = self.table.item(r, COL_FILE).data(Qt.UserRole)
-            row = self.rows[rid]
-            if (not row.jid and row.state == ST_READY and row.info) or \
-                    (row.jid and row.state in (ST_FAILED, ST_CANCELLED)):
-                targets.append(rid)
-        if not targets:
-            QMessageBox.information(self, APP_NAME, "エンコード待ちのファイルがありません。")
-            return
         try:
             self.client.ensure()
         except ServerError as e:
             QMessageBox.warning(self, APP_NAME, f"キューを受け持つ Web サーバーに接続できません。\n{e}")
             return
-        for rid in targets:
+        for r in range(self.table.rowCount()):
+            rid = self.table.item(r, COL_FILE).data(Qt.UserRole)
             row = self.rows[rid]
             try:
-                if row.jid:                       # 失敗・中止したもの: 今の選択肢でやり直す
+                if not row.jid:
+                    self._send(rid)
+                elif row.state in (ST_FAILED, ST_CANCELLED):
                     self.client.retry(row.jid, self._opts(row))
-                else:
-                    row.jid = self.client.add(KIND, row.path, self._opts(row))
-                    self.log_pos[row.jid] = 0
+                    row.sent, row.sent_opts = time.time(), self._opts(row)
+                    row.w["prog"].setValue(0)
+                    self._set(rid, ST_QUEUED)
+                    self._update(rid)
             except ServerError as e:
-                QMessageBox.warning(self, APP_NAME, f"{row.path.name} をキューに追加できません。\n{e}")
-                break
-            row.sent = time.time()
-            row.w["prog"].setValue(0)
-            self._set(rid, ST_QUEUED)
-        self._stopping = False
+                QMessageBox.warning(self, APP_NAME, f"{row.path.name} をキューに入れられません。\n{e}")
+                return
+        if not any(r.jid and r.state in (ST_QUEUED, ST_RUNNING) for r in self.rows.values()):
+            QMessageBox.information(self, APP_NAME, "エンコード待ちのファイルがありません。")
+            return
+        try:
+            self.client.start_queue()
+        except ServerError as e:
+            QMessageBox.warning(self, APP_NAME, str(e))
+            return
+        self._active = True
         self._poll()
 
     def _stop(self):
+        """キューを停止する。処理中のものは待機に戻り、次に開始すると続きから再開する"""
         try:
-            self.client.stop_all()
+            self.client.stop_queue()
         except ServerError as e:
             QMessageBox.warning(self, APP_NAME, str(e))
             return
         self._stopping = True
         self.btn_stop.setEnabled(False)
-        self.cur.setText("停止中…（途中までの分は残ります。もう一度開始すると続きから再開します）")
+        self.cur.setText("停止中…（処理中だったものは待機に戻ります。もう一度開始すると続きから再開します）")
 
     def _after_changed(self):
         self._set_after(self.c_after.currentData())
@@ -908,37 +947,78 @@ class AvMainWindow(QMainWindow):
         url = self.client.base
         self.srv_chip.setText(f'キュー: <a href="{url}/" style="color:#9cc0ff">{url.split("//")[-1]}</a>')
         self.srv_chip.setToolTip("Web 画面と同じキューです")
-        if self._inst and st.get("instance") != self._inst:
-            # サーバーが再起動してキューが消えた: 送ったものは開始前に戻す
-            for rid, row in list(self.rows.items()):
-                if row.jid:
-                    row.jid = None
-                    if row.state in (ST_QUEUED, ST_RUNNING) and row.info:
-                        row.state = ST_READY
-                        self._update(rid)
-            self.log_pos.clear()
+        restarted = bool(self._inst) and st.get("instance") != self._inst
         self._inst = st.get("instance")
+        self._active = bool((st.get("queue") or {}).get("active"))
         self._after_info = st.get("after") or {}
         self._show_after()
         jobs = [j for j in st["jobs"] if j["kind"] == KIND]
         byid = {j["id"]: j for j in jobs}
         by_jid = {r.jid: rid for rid, r in self.rows.items() if r.jid}
-        # Web 画面などで消されたものは、この表からも消す
-        self._drop_rows([rid for jid, rid in by_jid.items() if jid not in byid and self.rows[rid].sent < t])
+        gone = [rid for jid, rid in by_jid.items() if jid not in byid and self.rows[rid].sent < t]
+        if restarted:
+            # サーバーが起動し直して、キューに無くなったもの（以前の版のサーバーなど）: 手元に戻して入れ直す
+            for rid in gone:
+                row = self.rows[rid]
+                row.jid = None
+                if row.info and row.info.video and row.state in (ST_QUEUED, ST_RUNNING):
+                    row.state = ST_READY
+            gone = []
+        self._drop_rows(gone)                     # Web 画面などで消されたもの
         for j in jobs:
             rid = by_jid.get(j["id"])
             if rid is None:                       # Web 画面から追加されたもの
                 rid = self._add_row(Path(j["path"]), jid=j["id"], options=j["options"])
+                self.rows[rid].sent_opts = dict(j["options"])
                 self.log_pos[j["id"]] = max(0, j["log_lines"] - 200) if j["state"] == "running" else j["log_lines"]
             elif self.rows[rid].sent >= t:
                 continue                          # 送る前に取った状態
             self._show_job(rid, j)
+        for rid, row in list(self.rows.items()):  # まだキューに入っていないもの
+            if not row.jid and row.state == ST_READY:
+                self._send(rid)
         for jid, (lines, nxt) in logs.items():
             if lines:
                 self.logw.appendPlainText("\n".join(lines))
             self.log_pos[jid] = nxt
         self._summary(jobs)
+        self._check_code(st, jobs)
         self._hint()
+
+    def _check_code(self, st, jobs):
+        """動いているサーバーのコードが、いまのファイルと違う（更新したのに古いまま）なら起動し直す。
+        エンコード中は止めないよう、終わるまで待つ（キューは保存されるので、起動し直しても残る）"""
+        disk = code_fingerprint(max_age=10)
+        if self._my_code != disk:
+            self.srv_chip.setToolTip("プログラムが更新されています。この画面を開き直してください")
+        if st.get("code") == disk:
+            return
+        if any(j["state"] == "running" for j in st["jobs"]):
+            self.srv_chip.setText(self.srv_chip.text() + "（サーバーが更新前のままです。今のエンコードが終わったら起動し直します）")
+            return
+        if self._restarting or time.time() - self._restart_failed < 60:
+            return
+        self._restarting = True
+        self.srv_chip.setText("キュー: サーバーを新しいプログラムで起動し直しています…")
+        sig, client = self.rsig, self.client
+
+        class Task(QRunnable):
+            def run(self):
+                try:
+                    client.restart()
+                    r = (None, {}, "", 0.0)
+                except Exception as e:  # noqa: BLE001
+                    r = (None, {}, str(e), 0.0)
+                _emit(sig, *r)
+        self.pool.start(Task())
+
+    @Slot(object, object, str, float)
+    def _on_restarted(self, _st, _logs, err, _t):
+        self._restarting = False
+        if err:
+            self._restart_failed = time.time()
+            self.cur.setText(f"サーバーを起動し直せませんでした: {err}")
+        self._poll()
 
     def _show_job(self, rid, j):
         row = self.rows[rid]
@@ -947,6 +1027,8 @@ class AvMainWindow(QMainWindow):
         if state == ST_RUNNING:
             row.w["status"].setText(f"処理中: {j['label']}")
             row.w["status"].setToolTip(j["label"])
+        elif state == ST_QUEUED:
+            self._update(rid)                     # 待機 → これから行う処理
         if state == ST_DONE and j.get("warning"):
             row.w["status"].setText(f"完了（注意あり）: {j['warning']}")
             row.w["status"].setStyleSheet("color: #c8a96a;")
@@ -955,13 +1037,13 @@ class AvMainWindow(QMainWindow):
             row.w["prog"].setValue(int(j["progress"] * 1000))
 
     def _summary(self, jobs):
-        active = [j for j in jobs if j["state"] in ("queued", "running")]
+        queued = [j for j in jobs if j["state"] == "queued"]
         run = next((j for j in jobs if j["state"] == "running"), None)
         n = len(jobs)
         fin = sum(1 for j in jobs if j["state"] in ("done", "failed", "cancelled"))
-        if not active:
+        if not self._active and not run:
             self._stopping = False
-        self.btn_stop.setEnabled(bool(active) and not self._stopping)
+        self.btn_stop.setEnabled(self._active and not self._stopping)
         self.total.setValue(int((fin + (run["progress"] if run else 0)) / n * 1000) if n else 0)
         a = self._after_info or {}
         if a.get("seconds"):
@@ -971,8 +1053,10 @@ class AvMainWindow(QMainWindow):
             return
         if run:
             self.cur.setText(f"{jobs.index(run) + 1}/{n}  {Path(run['path']).name} — {run['label']}")
-        elif active:
+        elif queued and self._active:
             self.cur.setText("順番待ち…")
+        elif queued:
+            self.cur.setText(f"停止中です。待機 {len(queued)} 件は「エンコード開始」で始まります")
         elif n:
             ok = sum(1 for j in jobs if j["state"] == "done")
             ng = sum(1 for j in jobs if j["state"] == "failed")
@@ -982,17 +1066,17 @@ class AvMainWindow(QMainWindow):
             self.cur.setText(a.get("message", ""))
 
     def closeEvent(self, e):
-        if any(r.jid and r.state in (ST_QUEUED, ST_RUNNING) for r in self.rows.values()):
+        if self._active and any(r.jid and r.state in (ST_QUEUED, ST_RUNNING) for r in self.rows.values()):
             box = QMessageBox(QMessageBox.Question, APP_NAME,
                               "エンコードはこの画面を閉じても裏で続きます（Web 画面でも確認できます）。\n"
-                              "中止する場合も、途中までの分は残り、次回続きから再開できます。", parent=self)
+                              "停止する場合も、途中までの分は残り、次に開始すると続きから再開します。", parent=self)
             keep = box.addButton("閉じる（続ける）", QMessageBox.AcceptRole)
-            stop = box.addButton("中止して閉じる", QMessageBox.DestructiveRole)
+            stop = box.addButton("停止して閉じる", QMessageBox.DestructiveRole)
             box.addButton("キャンセル", QMessageBox.RejectRole)
             box.exec()
             if box.clickedButton() is stop:
                 try:
-                    self.client.stop_all()
+                    self.client.stop_queue()
                 except ServerError:
                     pass
             elif box.clickedButton() is not keep:
@@ -1003,3 +1087,4 @@ class AvMainWindow(QMainWindow):
         self.s.window_geometry = bytes(self.saveGeometry()).hex()
         self.s.save()
         super().closeEvent(e)
+

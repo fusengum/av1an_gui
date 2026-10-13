@@ -3,6 +3,7 @@
 認証は無し（LAN 内での利用を想定）。"""
 from __future__ import annotations
 
+import json
 import os
 import string
 import threading
@@ -23,6 +24,7 @@ from shared.core import probe as P
 from shared.core import tools
 from shared.core.config import APP_ROOT, IS_WIN
 from shared.core.runner import Cancelled
+from shared.version import code_fingerprint
 
 from .apps import load_apps
 
@@ -32,6 +34,7 @@ MEDIA_EXTS = {".mkv", ".mka", ".mp4", ".m4v", ".mov", ".m2ts", ".mts", ".ts", ".
 HIDDEN_SETTINGS = {"window_geometry", "recent_dir"}
 VERSION = "0.3.0"
 INSTANCE = uuid.uuid4().hex[:12]       # 起動ごとに変わる（デスクトップ版がサーバーの再起動を見分ける）
+CODE = code_fingerprint()              # 起動したときのコード（デスクトップ版がファイルと比べ、古ければ起動し直す）
 
 
 # ------------------------------------------------------------------ ジョブ
@@ -53,10 +56,13 @@ class WebJob:
     finished: float = 0.0
     log: list[str] = field(default_factory=list)
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+    requeue: bool = False           # キューの「停止」で止めた（中止ではなく待機に戻す）
+
+    SAVED = ("id", "kind", "path", "options", "state", "progress", "label", "output", "error", "warning",
+             "created", "started", "finished")
 
     def summary(self) -> dict:
-        d = {k: getattr(self, k) for k in ("id", "kind", "path", "options", "state", "progress", "label", "output",
-                                           "error", "warning", "created", "started", "finished")}
+        d = {k: getattr(self, k) for k in self.SAVED}
         d["name"] = Path(self.path).name
         d["log_lines"] = len(self.log)
         a = load_apps().get(self.kind)
@@ -64,18 +70,75 @@ class WebJob:
         return d
 
 
+QUEUE_FILE = APP_ROOT / "logs" / "queue.json"
+
+
 class JobQueue:
-    def __init__(self):
+    """ジョブの順番待ち。キュー全体に「開始 / 停止」の状態を持ち、開始中だけ上から順に 1 件ずつ処理する。
+    全部終わると停止に戻る。ジョブは logs/queue.json に保存し、サーバーを起動し直しても残す
+    （起動し直した直後は停止。処理中だったものは待機に戻す）"""
+
+    def __init__(self, path: Path | None = QUEUE_FILE):
         self.jobs: dict[str, WebJob] = {}
         self.order: list[str] = []
         self.lock = threading.Lock()
         self.wake = threading.Event()
-        # すべて終わった後の電源操作。「すべて中止」や、最後のジョブが中止で終わったときは行わない
+        self.path = path
+        self.active = False           # 開始中
+        # すべて終わった後の電源操作。キューの「停止」や、最後のジョブが中止で終わったときは行わない
         self.after = power.NONE
         self.after_at = 0.0           # 実行する時刻（猶予中だけ 0 以外）
         self.after_msg = ""
-        self._ran = False             # 前回キューが空になってから、中止以外で終わったジョブがある
+        self._ran = False             # 開始してから、中止以外で終わったジョブがある
+        self._load()
         threading.Thread(target=self._loop, daemon=True).start()
+
+    # ---------------------------------------------------------------- 保存
+    def _load(self):
+        if not self.path:
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        for d in data.get("jobs", []):
+            try:
+                j = WebJob(**{k: d[k] for k in WebJob.SAVED if k in d})
+            except TypeError:
+                continue
+            j.log = list(d.get("log", []))
+            if j.state == "running":              # 途中で止まった: 次に開始したとき続きから
+                j.state, j.label, j.progress = "queued", "待機", 0.0
+            self.jobs[j.id] = j
+            self.order.append(j.id)
+
+    def save(self):
+        if not self.path:
+            return
+        with self.lock:
+            data = {"jobs": [{**{k: getattr(j, k) for k in WebJob.SAVED}, "log": j.log[-300:]}
+                             for j in (self.jobs[i] for i in self.order)]}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    # ---------------------------------------------------------------- 開始・停止
+    def start(self):
+        self.active, self.after_msg = True, ""
+        self.wake.set()
+
+    def stop(self):
+        """停止: 処理中のジョブを止めて待機に戻す（次に開始すると続きから）。終わった後の電源操作はしない"""
+        self.disarm()
+        self.active = False
+        for j in self.list():
+            if j.state == "running":
+                j.requeue = True
+                j.cancel.set()
 
     def set_after(self, action: str):
         if action not in power.LABELS:
@@ -91,11 +154,13 @@ class JobQueue:
         return {"action": self.after, "label": power.LABELS[self.after], "seconds": rest, "message": self.after_msg,
                 "choices": power.LABELS}
 
+    # ---------------------------------------------------------------- ジョブ
     def add(self, kind: str, path: str, options: dict) -> WebJob:
         j = WebJob(id=uuid.uuid4().hex[:10], kind=kind, path=path, options=options)
         with self.lock:
             self.jobs[j.id] = j
             self.order.append(j.id)
+        self.save()
         self.wake.set()
         return j
 
@@ -105,12 +170,15 @@ class JobQueue:
             if j and j.state != "running":
                 del self.jobs[jid]
                 self.order.remove(jid)
+        self.save()
 
     def list(self) -> list[WebJob]:
         with self.lock:
             return [self.jobs[i] for i in self.order]
 
     def _next(self) -> WebJob | None:
+        if not self.active:
+            return None
         with self.lock:
             for i in self.order:
                 if self.jobs[i].state == "queued":
@@ -123,11 +191,15 @@ class JobQueue:
             if j is not None:
                 self.after_at = 0.0               # 猶予中に追加されたら、それが終わるまで待つ
                 self._run(j)
-                self._ran = j.state != "cancelled"
+                self.save()
+                if j.state != "queued":           # 停止で待機に戻したものは数えない
+                    self._ran = j.state != "cancelled"   # 最後が中止なら、終わった後の電源操作はしない
                 continue
+            if self.active and not any(x.state in ("queued", "running") for x in self.list()):
+                self.active = False               # 全部終わった
             if self.after == power.NONE:
                 self._ran = False                 # 何もせず待っている間に選んでも、すぐには実行しない
-            elif self._ran:
+            elif self._ran and not self.active:
                 if not self.after_at:
                     self.after_at = time.time() + power.GRACE_SEC
                 elif time.time() >= self.after_at:
@@ -148,7 +220,8 @@ class JobQueue:
         if j.cancel.is_set():                 # 取り出した直後に中止された
             j.state, j.label = "cancelled", "中止"
             return
-        j.state, j.started, j.label = "running", time.time(), "開始"
+        j.state, j.started, j.label, j.requeue = "running", time.time(), "開始", False
+        self.save()
 
         def log(m: str):
             j.log.append(m)
@@ -165,8 +238,12 @@ class JobQueue:
             j.output, j.warning = str(out or ""), " / ".join(warns)
             j.state, j.progress, j.label = "done", 1.0, "完了"
         except Cancelled:
-            j.state, j.label = "cancelled", "中止"
-            log("中止しました")
+            if j.requeue:                     # キューの停止: 待機に戻す（作業フォルダは残るので続きから）
+                j.state, j.label, j.cancel = "queued", "待機", threading.Event()
+                log("停止しました（次に開始すると続きから再開します）")
+            else:
+                j.state, j.label = "cancelled", "中止"
+                log("中止しました")
         except Exception as e:  # noqa: BLE001
             j.state, j.error, j.label = "failed", str(e), "失敗"
             log(f"エラー: {e}")
@@ -259,6 +336,7 @@ def meta():
     title, sub = _title()
     return {
         "version": VERSION, "title": title, "subtitle": sub, "root": str(APP_ROOT), "instance": INSTANCE,
+        "code": CODE,
         "apps": [{"id": a.id, "name": a.name, "desc": a.desc, "job_fields": a.job_fields,
                   "job_defaults": (a.job_defaults() if a.job_defaults else {}), "assist": bool(a.assist_encoders),
                   "settings_fields": a.settings_fields, "settings_note": a.settings_note, "tips": a.tips,
@@ -269,7 +347,8 @@ def meta():
 
 @app.get("/api/state")
 def state():
-    return {"instance": INSTANCE, "jobs": [j.summary() for j in Q.list()], "after": Q.after_state(),
+    return {"instance": INSTANCE, "code": CODE, "queue": {"active": Q.active},
+            "jobs": [j.summary() for j in Q.list()], "after": Q.after_state(),
             "env": {"running": ENV.running, "message": ENV.message, "progress": ENV.progress, "error": ENV.error}}
 
 
@@ -309,6 +388,24 @@ def cancel(jid: str):
     if j.state == "queued":
         j.state, j.label = "cancelled", "中止"
     j.cancel.set()
+    Q.save()
+    return {"ok": True}
+
+
+class OptionsReq(BaseModel):
+    options: dict
+
+
+@app.post("/api/jobs/{jid}/options")
+def set_options(jid: str, req: OptionsReq):
+    """始まる前のジョブの選択肢（種類・解像度など）を変える"""
+    j = Q.jobs.get(jid)
+    if not j:
+        raise HTTPException(404)
+    if j.state == "running":
+        raise HTTPException(409, "処理中のジョブは変えられません")
+    j.options = dict(req.options)
+    Q.save()
     return {"ok": True}
 
 
@@ -325,23 +422,24 @@ def retry(jid: str, req: RetryReq | None = None):
         j.options = dict(req.options)
     j.state, j.progress, j.label, j.error, j.cancel = "queued", 0.0, "待機", "", threading.Event()
     j.output, j.warning, j.started, j.finished = "", "", 0.0, 0.0
+    Q.save()
     Q.wake.set()
     return {"ok": True}
 
 
-@app.post("/api/jobs/stop")
-def stop_all():
-    """待機中をすべて中止してから、処理中のものを止める（先に止めると次の待機が始まってしまう）"""
-    Q.disarm()                              # 強制的に止めたときは、終わった後の電源操作をしない
-    jobs = Q.list()
-    for j in jobs:
-        if j.state == "queued":
-            j.state, j.label = "cancelled", "中止"
-            j.cancel.set()
-    for j in jobs:
-        if j.state == "running":
-            j.cancel.set()
-    return {"ok": True}
+@app.post("/api/queue/start")
+def queue_start():
+    """キューを開始する（待機中のものを上から順に処理し、全部終わると停止に戻る）"""
+    Q.start()
+    return {"ok": True, "active": Q.active}
+
+
+@app.post("/api/queue/stop")
+@app.post("/api/jobs/stop")                    # 以前の名前（すべて中止）
+def queue_stop():
+    """キューを停止する。処理中のものは止めて待機に戻し、次に開始すると続きから再開する"""
+    Q.stop()
+    return {"ok": True, "active": Q.active}
 
 
 @app.delete("/api/jobs/{jid}")
@@ -375,9 +473,10 @@ def web_settings():
 
 @app.post("/api/server/restart")
 def restart_server():
-    """設定を読み直すために起動し直す。エンコード中は断る（止まってしまうため）"""
-    if any(j.state in ("queued", "running") for j in Q.list()):
-        raise HTTPException(409, "エンコード中（または待機中）のジョブがあるため、再起動できません")
+    """設定やコードを読み直すために起動し直す。キューは保存してあるので残る。エンコード中は断る（止まってしまうため）"""
+    if any(j.state == "running" for j in Q.list()):
+        raise HTTPException(409, "エンコード中のジョブがあるため、再起動できません")
+    Q.save()
 
     def later():
         time.sleep(0.5)

@@ -24,7 +24,9 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class ServerError(Exception):
-    pass
+    def __init__(self, msg: str, status: int = 0):
+        super().__init__(msg)
+        self.status = status          # HTTP の状態コード（つながらなかったときは 0）
 
 
 def write_info(host: str, port: int) -> None:
@@ -72,7 +74,7 @@ class Client:
                 msg = json.loads(e.read()).get("detail") or str(e)
             except Exception:  # noqa: BLE001
                 msg = str(e)
-            raise ServerError(str(msg)) from None
+            raise ServerError(str(msg), e.code) from None
         except (urllib.error.URLError, OSError, ValueError) as e:
             if base is None:
                 self.base = ""
@@ -162,16 +164,39 @@ class Client:
     def remove(self, jid: str) -> None:
         self.delete(f"/api/jobs/{jid}")
 
-    def stop_all(self) -> None:
-        self.post("/api/jobs/stop")
+    def set_options(self, jid: str, options: dict) -> None:
+        self.post(f"/api/jobs/{jid}/options", {"options": options})
+
+    def start_queue(self) -> None:
+        self.post("/api/queue/start")
+
+    def stop_queue(self) -> None:
+        """停止: 処理中のものは待機に戻る（次に開始すると続きから）"""
+        try:
+            self.post("/api/queue/stop")
+        except ServerError as e:
+            if e.status != 404:
+                raise
+            self.post("/api/jobs/stop")          # 以前の版のサーバー
+
+    stop_all = stop_queue
 
     def set_after(self, action: str) -> dict:
         return self.post("/api/after", {"action": action})
 
     def restart(self, wait: float = 25) -> None:
-        """設定を反映するためにサーバーを起動し直し、つながるまで待つ"""
+        """設定やコードを反映するためにサーバーを起動し直し、つながるまで待つ。
+        起動し直す窓口が無い以前の版のサーバーは、プロセスを止めてから起動する"""
         old = self.get("/api/meta").get("instance")
-        self.post("/api/server/restart")
+        try:
+            self.post("/api/server/restart")
+        except ServerError as e:
+            if e.status not in (404, 405):
+                raise
+            kill_servers()
+            self.base = ""
+            self.ensure(wait)
+            return
         self.base = ""
         end = time.time() + wait
         while time.time() < end:
@@ -186,3 +211,54 @@ class Client:
 
     def log(self, jid: str, since: int) -> dict:
         return self.get(f"/api/jobs/{urllib.parse.quote(jid)}/log?since={since}")
+
+
+# ------------------------------------------------------------------ 以前の版のサーバーを止める
+
+def _same_dir(path: str) -> bool:
+    try:
+        return Path(path).resolve() == APP_ROOT
+    except OSError:
+        return False
+
+
+def server_pids() -> list[int]:
+    """このフォルダの Web サーバー（python -m shared.web）のプロセス。このプロセス自身は含めない"""
+    pids = set()
+    me = os.getpid()
+    root = str(APP_ROOT).lower()
+    if IS_WIN:
+        ps = ("Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%shared.web%'\" | "
+              "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
+                           timeout=30, creationflags=0x08000000)
+        for line in r.stdout.splitlines():
+            n, _, cmd = line.partition("\t")
+            # venv の python とその子（uv で入れた本体）は、どちらもこのフォルダの中にある
+            if n.strip().isdigit() and "-m shared.web" in cmd and root in cmd.lower():
+                pids.add(int(n))
+    else:
+        for e in os.listdir("/proc"):
+            if not e.isdigit():
+                continue
+            try:
+                cmd = Path(f"/proc/{e}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+                if "-m shared.web" in cmd and _same_dir(os.readlink(f"/proc/{e}/cwd")):
+                    pids.add(int(e))
+            except OSError:
+                continue
+    pids.discard(me)
+    return sorted(pids)
+
+
+def kill_servers() -> list[int]:
+    pids = server_pids()
+    for n in pids:
+        try:
+            if IS_WIN:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(n)], capture_output=True, creationflags=0x08000000)
+            else:
+                os.kill(n, 9)                     # systemd のサービスなら、異常終了として起動し直される
+        except OSError:
+            pass
+    return pids
