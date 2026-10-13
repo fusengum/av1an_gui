@@ -3,7 +3,7 @@
   python -m av1gui check
   python -m av1gui encode FILE_OR_DIR... [--encoder svt-av1|aom|rav1e|x265|x264] [--quality high|standard|small|N]
                                          [--speed slow|medium|fast] [--content film|anime|standard]
-                                         [--res keep|1080p] [--crop auto|none] [--audio copy|opus|none]
+                                         [--res keep|1080p] [--crop auto|none] [--audio copy|opus]
                                          [--workers N] [--threads N] [--target-vmaf 95] [--extra "..."] [--out DIR]
 """
 from __future__ import annotations
@@ -45,7 +45,7 @@ def main(argv: list[str]) -> int:
     e.add_argument("--content", choices=["film", "anime", "standard"])
     e.add_argument("--res", choices=["keep", "1080p"])
     e.add_argument("--crop", choices=["auto", "none"])
-    e.add_argument("--audio", choices=["copy", "opus", "none"])
+    e.add_argument("--audio", choices=["copy", "opus"])
     e.add_argument("--workers", type=int, help="並列数（0 = 自動）")
     e.add_argument("--threads", type=int, help="1 本あたりのスレッド（0 = 自動）")
     e.add_argument("--target-vmaf", type=float, help="目標画質（VMAF）。指定すると画質の値は自動で探します")
@@ -100,7 +100,8 @@ def main(argv: list[str]) -> int:
         job = AvJob(f, content=a.content or s.default_content, res=a.res or s.default_res,
                     crop=a.crop or s.default_crop, audio=a.audio or s.default_audio)
         try:
-            AvPipeline(s, print, _bar).run(job)
+            for w in AvPipeline(s, print, _bar).run(job).warnings:
+                print(f"注意: {w}")
         except Exception as ex:  # noqa: BLE001
             fails += 1
             print(f"\n失敗: {f.name}: {ex}", file=sys.stderr)

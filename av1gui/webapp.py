@@ -17,7 +17,8 @@ def _run(path: Path, o: dict, log, prog, cancel):
     s = AvSettings.load()
     job = AvJob(path, content=o.get("content", s.default_content), res=o.get("res", s.default_res),
                 crop=o.get("crop", s.default_crop), audio=o.get("audio", s.default_audio))
-    return AvPipeline(s, log, prog, cancel).run(job).output
+    r = AvPipeline(s, log, prog, cancel).run(job)
+    return r.output, r.warnings
 
 
 def _probe(info) -> list[str]:

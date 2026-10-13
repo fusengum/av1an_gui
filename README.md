@@ -8,7 +8,7 @@
 - 並列数とスレッド数を CPU 数・空きメモリから自動決定（上限なし）
 - 目標画質（VMAF）モード、途中で止めても続きから再開
 - 黒帯の自動切り取り、1080p への縮小
-- 音声はそのまま / Opus に変換 / 外す。字幕とチャプターは引き継ぎます
+- 音声はそのまま / Opus に変換。元の音声・字幕・チャプターはすべて引き継ぎ、出来上がったファイルで欠けていないか確かめます（入れられなかったトラックがあれば「完了（注意あり）」として知らせます）
 - HDR10 / HLG の色情報とマスタリング情報を引き継ぎます
 - デスクトップ版（Qt）と Web 画面（ブラウザから操作。VM・サーバー向け）
 - Windows / Linux。**Python も入っていない状態から全自動で環境を作ります**
@@ -59,7 +59,7 @@
 python -m av1gui check
 python -m av1gui encode FILE_OR_DIR... [--encoder svt-av1|aom|rav1e|x265|x264] [--quality high|standard|small|N]
                                        [--speed slow|medium|fast] [--content film|anime|standard]
-                                       [--res keep|1080p] [--crop auto|none] [--audio copy|opus|none]
+                                       [--res keep|1080p] [--crop auto|none] [--audio copy|opus]
                                        [--workers N] [--threads N] [--target-vmaf 95] [--extra "..."] [--out DIR]
 ```
 

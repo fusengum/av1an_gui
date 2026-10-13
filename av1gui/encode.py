@@ -27,8 +27,8 @@ from shared.core.tools import find_tool
 from . import encoders as E
 from .config import AvSettings
 
-AUDIO_COPY, AUDIO_OPUS, AUDIO_NONE = "copy", "opus", "none"
-AUDIO_LABELS = {AUDIO_COPY: "そのまま", AUDIO_OPUS: "Opus に変換", AUDIO_NONE: "外す"}
+AUDIO_COPY, AUDIO_OPUS = "copy", "opus"
+AUDIO_LABELS = {AUDIO_COPY: "そのまま", AUDIO_OPUS: "Opus に変換"}   # 元の音声は必ず残す（外す選択肢は置かない）
 CHUNK_LABELS = {"auto": "自動", "hybrid": "hybrid（追加の準備不要）", "segment": "segment（分割ファイルを作る）",
                 "lsmash": "lsmash（要 VapourSynth プラグイン）", "ffms2": "ffms2（要 VapourSynth プラグイン）",
                 "bestsource": "bestsource（要 VapourSynth プラグイン）"}
@@ -52,6 +52,35 @@ class AvJob:
 class AvResult:
     output: Path | None = None
     log: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)   # 完了したが注意が要ること（入らなかったトラックなど）
+
+
+def _missing(kind: str, src: list, got: list, key) -> str:
+    """元にあったトラックが新しいファイルに足りなければ、その説明。key: 同じトラックとみなす目印"""
+    if len(got) >= len(src):
+        return ""
+    left = [key(t) for t in got]
+    lost = []
+    for t in src:
+        k = key(t)
+        if k in left:
+            left.remove(k)
+        else:
+            lost.append(t)
+    lost = (lost or src)[:len(src) - len(got)]
+    return (f"{kind} {len(src)} 本のうち {len(src) - len(got)} 本が新しいファイルに入りませんでした: "
+            + "、".join(t.describe() for t in lost))
+
+
+def check_tracks(info: P.MediaInfo, out: Path, audio: str, ffprobe: str) -> list[str]:
+    """元の音声・字幕が欠けていないか、出来上がったファイルを調べる（mkvmerge は読めないトラックを
+    警告だけで飛ばすため）。変換した音声は、本数と言語・タイトルで比べる"""
+    got = P.probe(out, ffprobe)
+    warns = []
+    key = (lambda a: (a.language, a.title)) if audio == AUDIO_OPUS else (lambda a: (a.codec, a.language, a.title))
+    warns.append(_missing("音声", info.audio, got.audio, key))
+    warns.append(_missing("字幕", info.subtitles, got.subtitles, lambda t: (t.language, t.title)))
+    return [w for w in warns if w]
 
 
 def video_notes(info: P.MediaInfo) -> list[str]:
@@ -145,6 +174,8 @@ class AvPipeline:
 
     def run(self, job: AvJob, info: P.MediaInfo | None = None) -> AvResult:
         res = AvResult()
+        if job.audio not in AUDIO_LABELS:
+            job.audio = AUDIO_COPY          # 以前の版の「外す」など: 元の音声は必ず残す
 
         def log(m):
             res.log.append(m)
@@ -286,6 +317,9 @@ class AvPipeline:
         prog("mux", "MKV を作成中", 0.1)
         self._mux(runner, mkvmerge, info, vid, opus, job.audio, out)
         res.output = out
+        for w in check_tracks(info, out, job.audio, ffprobe):
+            res.warnings.append(w)
+            log(f"警告: {w}")
         if not s.keep_temp:
             shutil.rmtree(tmp, ignore_errors=True)
         a, b = info.path.stat().st_size, out.stat().st_size

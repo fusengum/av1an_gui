@@ -200,7 +200,7 @@ async function refresh(){
     <td><img src="/icon/${j.kind}" width="18" style="vertical-align:middle"> ${esc(APPS[j.kind]?.name||j.kind)}</td>
     <td class="small">${esc(j.option_text)}</td>
     <td><div class="bar"><i style="width:${(j.progress*100).toFixed(1)}%"></i></div><div class="small muted">${(j.progress*100).toFixed(1)}% ${esc(j.state==='running'?j.label:'')}</div></td>
-    <td class="st-${j.state}" title="${esc(j.error)}">${ST[j.state]}${j.error?'<div class="small">'+esc(j.error).slice(0,80)+'</div>':''}</td>
+    <td class="st-${j.state}" title="${esc(j.error||j.warning)}">${ST[j.state]}${j.error?'<div class="small">'+esc(j.error).slice(0,80)+'</div>':''}${j.warning?'<div class="small" style="color:var(--warn)">注意: '+esc(j.warning)+'</div>':''}</td>
     <td style="white-space:nowrap"><button class="b" onclick="showLog('${j.id}','${esc(j.name)}')">ログ</button>
       ${['queued','running'].includes(j.state)?`<button class="d" onclick="api('/api/jobs/${j.id}/cancel',{method:'POST'}).then(refresh)">中止</button>`:''}
       ${['failed','cancelled'].includes(j.state)?`<button class="b" onclick="api('/api/jobs/${j.id}/retry',{method:'POST'}).then(refresh)">再実行</button>`:''}
@@ -234,7 +234,7 @@ async function browse(p){
 }
 function selAll(v){$('fslist').querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=v)}
 async function probe(p){$('probe').textContent='解析中…';try{const r=await api('/api/probe',{method:'POST',body:JSON.stringify({path:p,kind:$('kind').value})});
-  $('probe').innerHTML=`<b>${esc(p.split(/[\\/]/).pop())}</b><br>映像: ${esc(r.video||'—')}<br>音声: ${r.audio.map(a=>esc(a.label)).join('、')||'—'}${r.extra.map(x=>'<br>'+esc(x)).join('')}`}catch(e){$('probe').textContent=e.message}}
+  $('probe').innerHTML=`<b>${esc(p.split(/[\\/]/).pop())}</b><br>映像: ${esc(r.video||'—')}<br>音声: ${r.audio.map(a=>esc(a.label)).join('、')||'—'}<br>字幕: ${(r.subtitles||[]).map(a=>esc(a.label)).join('、')||'—'}${r.extra.map(x=>'<br>'+esc(x)).join('')}`}catch(e){$('probe').textContent=e.message}}
 async function addJobs(){
   const kind=$('kind').value;let paths=[...$('fslist').querySelectorAll('input:checked')].map(c=>c.value);let rec=false;
   if($('addfolder').checked&&FS.path){paths=[FS.path];rec=true}

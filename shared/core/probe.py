@@ -1,4 +1,4 @@
-"""入力ファイルの解析（映像・音声トラック、HDR の情報）。
+"""入力ファイルの解析（映像・音声・字幕トラック、HDR の情報）。
 
 ツールごとの追加の読み取りは ENRICHERS などのフックで足す。"""
 from __future__ import annotations
@@ -95,15 +95,50 @@ class AudioTrack:
         return " ".join(parts)
 
 
+SUB_NAMES = {"hdmv_pgs_subtitle": "PGS", "ass": "ASS", "ssa": "SSA", "subrip": "SRT", "srt": "SRT",
+             "dvd_subtitle": "VobSub", "dvb_subtitle": "DVB", "mov_text": "MP4 テキスト", "webvtt": "WebVTT",
+             "hdmv_text_subtitle": "TextST", "arib_caption": "ARIB 字幕", "dvb_teletext": "文字放送（Teletext）"}
+
+
+@dataclass
+class SubtitleTrack:
+    index: int            # ffprobe stream index
+    order: int            # 字幕トラック内での順番（0 起点）
+    codec: str
+    language: str
+    title: str
+    default: bool
+    forced: bool
+
+    def describe(self) -> str:
+        parts = [f"#{self.order + 1}", SUB_NAMES.get(self.codec, self.codec or "不明")]
+        if self.language and self.language != "und":
+            parts.append(self.language)
+        if self.title:
+            parts.append(f"「{self.title}」")
+        if self.forced:
+            parts.append("（強制）")
+        return " ".join(parts)
+
+
 @dataclass
 class MediaInfo:
     path: Path
     duration: float
     audio: list[AudioTrack] = field(default_factory=list)
+    subtitles: list[SubtitleTrack] = field(default_factory=list)
     has_video: bool = False
     video_start: float = 0.0
     streams: list[dict] = field(default_factory=list)
     video: VideoTrack | None = None
+
+    def track_lines(self) -> list[str]:
+        """音声・字幕の一覧（画面の説明用）"""
+        lines = [f"音声 {len(self.audio)} 本" + ("" if self.audio else "（なし）")]
+        lines += [f"  {a.describe()}" + ("（既定）" if a.default and len(self.audio) > 1 else "") for a in self.audio]
+        lines.append(f"字幕 {len(self.subtitles)} 本" + ("" if self.subtitles else "（なし）"))
+        lines += [f"  {t.describe()}" for t in self.subtitles]
+        return lines
 
 
 def probe(path: str | Path, ffprobe: str) -> MediaInfo:
@@ -117,7 +152,7 @@ def probe(path: str | Path, ffprobe: str) -> MediaInfo:
     fmt = data.get("format", {})
     info = MediaInfo(path=path, duration=float(fmt.get("duration") or 0), streams=data.get("streams", []))
 
-    order = 0
+    order = sub_order = 0
     for s in info.streams:
         t = s.get("codec_type")
         if t == "video" and s.get("disposition", {}).get("attached_pic", 0) == 0:
@@ -135,6 +170,14 @@ def probe(path: str | Path, ffprobe: str) -> MediaInfo:
                 title=tags.get("title", ""), start_time=float(s.get("start_time") or 0),
                 default=bool(s.get("disposition", {}).get("default", 0))))
             order += 1
+        elif t == "subtitle":
+            tags = {k.lower(): v for k, v in (s.get("tags") or {}).items()}
+            disp = s.get("disposition", {})
+            info.subtitles.append(SubtitleTrack(
+                index=s["index"], order=sub_order, codec=s.get("codec_name", "") or "",
+                language=tags.get("language", "und"), title=tags.get("title", ""),
+                default=bool(disp.get("default", 0)), forced=bool(disp.get("forced", 0))))
+            sub_order += 1
 
     for e in ENRICHERS:
         e(info)

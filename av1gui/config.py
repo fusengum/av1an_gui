@@ -46,7 +46,7 @@ class AvSettings:
     default_content: str = "film"    # film | anime | standard
     default_res: str = "keep"        # keep | 1080p
     default_crop: str = "auto"       # auto | none
-    default_audio: str = "copy"      # copy | opus | none
+    default_audio: str = "copy"      # copy | opus
 
     window_geometry: str = ""
     recent_dir: str = ""
@@ -62,6 +62,8 @@ class AvSettings:
                 for k, v in data.items():
                     if k in names:
                         setattr(s, k, v)
+                if s.default_audio not in ("copy", "opus"):
+                    s.default_audio = "copy"     # 以前の版の「外す」（none）は無くした
                 if "split" not in data:
                     # 以前の版: 既定（10 秒・24 フレーム）のままなら自動に、変えていたら手動のまま使う
                     changed = float(data.get("max_scene_sec", 10)) != 10 or int(data.get("min_scene_len", 24)) != 24

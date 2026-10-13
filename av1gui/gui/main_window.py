@@ -201,7 +201,7 @@ class AvMainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(["ファイル", "映像 ⓘ", "種類 ⓘ", "解像度 ⓘ", "黒帯 ⓘ", "音声 ⓘ", "状態 ⓘ", "進捗"])
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(COL_FILE, QHeaderView.Stretch)
-        for col, wd in [(COL_VINFO, 190), (COL_CONTENT, 110), (COL_RES, 120), (COL_CROP, 150), (COL_AUDIO, 120),
+        for col, wd in [(COL_VINFO, 280), (COL_CONTENT, 110), (COL_RES, 120), (COL_CROP, 150), (COL_AUDIO, 120),
                         (COL_STATUS, 300), (COL_PROG, 100)]:
             hh.setSectionResizeMode(col, QHeaderView.Interactive)
             self.table.setColumnWidth(col, wd)
@@ -701,8 +701,7 @@ class AvMainWindow(QMainWindow):
         if row.jid:                       # キューにあるもの: 映像の説明だけ（状態はサーバーに従う）
             row.info = info
             if info and info.video:
-                row.w["vinfo"].setText(info.video.describe())
-                row.w["vinfo"].setToolTip(info.video.detail())
+                self._show_vinfo(row)
             else:
                 row.w["vinfo"].setText("—")
             return
@@ -713,10 +712,15 @@ class AvMainWindow(QMainWindow):
         if info.video is None:
             self._set(rid, ST_ERROR, "映像がありません")
             return
-        row.w["vinfo"].setText(info.video.describe())
-        row.w["vinfo"].setToolTip(info.video.detail())
+        self._show_vinfo(row)
         row.state = ST_READY
         self._update(rid)
+
+    def _show_vinfo(self, row):
+        info = row.info
+        row.w["vinfo"].setText(f"{info.video.describe()}・音声 {len(info.audio)}・字幕 {len(info.subtitles)}")
+        row.w["vinfo"].setToolTip(info.video.detail() + "\n\n" + "\n".join(info.track_lines())
+                                  + "\n\n音声・字幕はすべて新しいファイルに入れます（Opus に変換するときは変換したもの）")
 
     def _job(self, row) -> AvJob:
         return AvJob(row.path, content=row.w["content"].currentData(), res=row.w["res"].currentData(),
@@ -943,6 +947,10 @@ class AvMainWindow(QMainWindow):
         if state == ST_RUNNING:
             row.w["status"].setText(f"処理中: {j['label']}")
             row.w["status"].setToolTip(j["label"])
+        if state == ST_DONE and j.get("warning"):
+            row.w["status"].setText(f"完了（注意あり）: {j['warning']}")
+            row.w["status"].setStyleSheet("color: #c8a96a;")
+            row.w["status"].setToolTip(j["warning"])
         if state != ST_DONE:
             row.w["prog"].setValue(int(j["progress"] * 1000))
 

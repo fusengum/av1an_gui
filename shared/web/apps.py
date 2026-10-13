@@ -26,7 +26,7 @@ class WebApp:
     tips: dict                           # キー → 説明（素の文字列）
     job_fields: list[dict]               # ファイルごとの選択肢 {key, label, choices, default, tip}
     settings_fields: list[list]          # [設定名, 表示名, 種類(text|number|bool|select), tip, 選択肢 or None]
-    run: Callable                        # (path, options, log, prog, cancel) -> 出力パス
+    run: Callable                        # (path, options, log, prog, cancel) -> 出力パス or (出力パス, 注意の list)
     settings_note: str = ""
     skip_re: str = ""                    # フォルダ追加時に除外する（変換済みの）ファイル名
     probe_extra: Callable | None = None  # (info) -> 追加の説明行 list[str]

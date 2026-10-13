@@ -47,6 +47,7 @@ class WebJob:
     label: str = "待機"
     output: str = ""
     error: str = ""
+    warning: str = ""               # 完了したが注意が要ること（入らなかったトラックなど）
     created: float = field(default_factory=time.time)
     started: float = 0.0
     finished: float = 0.0
@@ -55,7 +56,7 @@ class WebJob:
 
     def summary(self) -> dict:
         d = {k: getattr(self, k) for k in ("id", "kind", "path", "options", "state", "progress", "label", "output",
-                                           "error", "created", "started", "finished")}
+                                           "error", "warning", "created", "started", "finished")}
         d["name"] = Path(self.path).name
         d["log_lines"] = len(self.log)
         a = load_apps().get(self.kind)
@@ -159,7 +160,9 @@ class JobQueue:
 
         try:
             a = load_apps()[j.kind]
-            j.output = str(a.run(Path(j.path), j.options, log, prog, j.cancel) or "")
+            r = a.run(Path(j.path), j.options, log, prog, j.cancel)
+            out, warns = r if isinstance(r, tuple) else (r, [])
+            j.output, j.warning = str(out or ""), " / ".join(warns)
             j.state, j.progress, j.label = "done", 1.0, "完了"
         except Cancelled:
             j.state, j.label = "cancelled", "中止"
@@ -321,7 +324,7 @@ def retry(jid: str, req: RetryReq | None = None):
     if req and req.options is not None:
         j.options = dict(req.options)
     j.state, j.progress, j.label, j.error, j.cancel = "queued", 0.0, "待機", "", threading.Event()
-    j.output, j.started, j.finished = "", 0.0, 0.0
+    j.output, j.warning, j.started, j.finished = "", "", 0.0, 0.0
     Q.wake.set()
     return {"ok": True}
 
@@ -449,7 +452,8 @@ def probe(req: ProbeReq):
         except Exception as e:  # noqa: BLE001
             extra = [str(e)]
     return {"video": v.describe() if v else None, "video_detail": v.detail() if v else "",
-            "audio": [{"index": x.index, "label": x.describe()} for x in info.audio], "extra": extra}
+            "audio": [{"index": x.index, "label": x.describe()} for x in info.audio],
+            "subtitles": [{"index": x.index, "label": x.describe()} for x in info.subtitles], "extra": extra}
 
 
 def _settings_obj(kind: str):
