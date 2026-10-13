@@ -1,0 +1,25 @@
+{
+  "name": "av1an_gui",
+  "desc": "av1an で分割並列エンコード（AV1 / HEVC / H.264）",
+  "order": 30,
+  "settings_file": "settings_av1gui.json",
+  "folders": [],
+  "setup_steps": [
+    [
+      "ffmpeg",
+      "FFmpeg / FFprobe"
+    ],
+    [
+      "mkvmerge",
+      "MKVToolNix"
+    ],
+    [
+      "av1an",
+      "av1an 一式（分割並列エンコード）"
+    ],
+    [
+      "av1an_encoders",
+      "AV1 エンコーダ（SVT-AV1 / aomenc / rav1e / x264）"
+    ]
+  ]
+}

@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>web</title>
+<link rel="icon" id="favicon" href="/icon/main">
+<style>
+:root{
+  --bg:#16181d; --panel:#1b1e24; --panel2:#1f232a; --line:#2b2f38; --line2:#343944;
+  --text:#e6e8ec; --muted:#8a93a3; --accent:#4f8cff; --ok:#8de0a6; --ng:#ff8a95; --warn:#c8a96a; --run:#9cc0ff;
+  --cyan:#4fd6ff; --orange:#ff9e5e;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 "Segoe UI","Hiragino Sans","Noto Sans JP",system-ui,sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--line)}
+header img{width:30px;height:30px}
+header h1{font-size:18px;margin:0;font-weight:700}
+header .sub{color:var(--muted);font-size:12px}
+header .sp{flex:1}
+nav{display:flex;gap:4px;padding:0 16px;border-bottom:1px solid var(--line);overflow-x:auto}
+nav button{background:none;border:none;color:var(--muted);padding:10px 14px;font:inherit;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
+nav button.on{color:var(--text);border-bottom-color:var(--accent)}
+main{padding:16px 20px;max-width:1500px;margin:0 auto}
+section{display:none} section.on{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
+.card h2{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:600}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+th{color:var(--muted);font-weight:500;font-size:12px;background:var(--panel2)}
+tr:hover td{background:#1d2128}
+button,select,input{font:inherit;color:var(--text)}
+button.b{background:#262a33;border:1px solid var(--line2);border-radius:5px;padding:6px 12px;cursor:pointer}
+button.b:hover{background:#2e3340}
+button.p{background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;border-radius:5px;padding:7px 18px;cursor:pointer}
+button.d{background:#3a2226;border:1px solid #5a2a31;color:#ffb4bd;border-radius:5px;padding:4px 10px;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+select,input[type=text],input[type=number]{background:var(--panel);border:1px solid var(--line2);border-radius:4px;padding:5px 7px}
+input[type=text]{width:100%}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0}
+.row label{color:var(--muted);min-width:120px}
+.muted{color:var(--muted)} .small{font-size:12px}
+.bar{height:8px;background:#11141a;border-radius:4px;overflow:hidden;min-width:120px}
+.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),#8b6cff,var(--orange))}
+.st-done{color:var(--ok)} .st-failed{color:var(--ng)} .st-running{color:var(--run)} .st-cancelled{color:var(--warn)} .st-queued{color:var(--muted)}
+.chip{border-radius:10px;padding:2px 10px;font-size:12px}
+.chip.ok{background:#1d3326;color:var(--ok)} .chip.ng{background:#3a2226;color:#ffb4bd}
+.tip{cursor:help;color:var(--muted);margin-left:3px}
+.fs{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:6px}
+.fs div{padding:6px 10px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;cursor:pointer}
+.fs div:hover{background:#1d2128}
+.fs .dir::before{content:"📁"} .fs .file{cursor:default}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:900px){.grid2{grid-template-columns:1fr} .row label{min-width:100%}}
+pre.log{background:#121418;border:1px solid var(--line);border-radius:6px;padding:10px;max-height:60vh;overflow:auto;font:12px/1.45 Consolas,"Cascadia Mono",monospace;color:#b8c0cc;white-space:pre-wrap;margin:0}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--line2);border-radius:8px;width:min(1100px,94vw)}
+dialog::backdrop{background:#0008}
+.opt{display:none} .opt.on{display:block}
+</style>
+</head>
+<body>
+<header>
+  <img id="hicon" src="/icon/main" alt="">
+  <div><h1 id="htitle">web</h1><div class="sub" id="hsub"></div></div>
+  <div class="sp"></div>
+  <span id="envchip" class="chip"></span>
+</header>
+<nav>
+  <button data-t="queue" class="on">キュー</button>
+  <button data-t="add">ファイル追加</button>
+  <button data-t="set">設定</button>
+  <button data-t="env">環境</button>
+</nav>
+<main>
+
+<!-- キュー -->
+<section id="queue" class="on">
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">ジョブ（上から順に 1 件ずつ処理）</h2>
+      <button class="b" onclick="api('/api/jobs/clear',{method:'POST'}).then(refresh)">終わったものを消去</button>
+    </div>
+    <table><thead><tr><th>ファイル</th><th>ツール</th><th>内容</th><th style="width:22%">進捗</th><th>状態</th><th></th></tr></thead>
+    <tbody id="jobs"></tbody></table>
+    <p id="nojobs" class="muted">ジョブはありません。「ファイル追加」から追加してください。</p>
+  </div>
+</section>
+
+<!-- 追加 -->
+<section id="add">
+  <div class="grid2">
+    <div class="card">
+      <h2>ファイルを選ぶ（この VM 上のファイル）</h2>
+      <div class="row"><input type="text" id="fspath" placeholder="フォルダのパス" onkeydown="if(event.key==='Enter')browse(this.value)"><button class="b" onclick="browse(fspath.value)">開く</button></div>
+      <div class="row small muted"><span id="fscur"></span></div>
+      <div class="fs" id="fslist"></div>
+      <div class="row">
+        <button class="b" onclick="selAll(true)">すべて選択</button><button class="b" onclick="selAll(false)">選択解除</button>
+        <label style="min-width:auto"><input type="checkbox" id="addfolder"> このフォルダ全体（サブフォルダも）を追加</label>
+      </div>
+      <div id="probe" class="small muted"></div>
+    </div>
+    <div class="card">
+      <h2>処理内容</h2>
+      <div class="row" id="kindrow"><label>ツール</label><select id="kind" onchange="showOpt()"></select></div>
+      <div id="opts"></div>
+      <div class="row" style="margin-top:14px"><button class="p" onclick="addJobs()">キューに追加</button><span id="addmsg" class="small"></span></div>
+    </div>
+  </div>
+</section>
+
+<!-- 設定 -->
+<section id="set">
+  <div class="grid2" id="setcards"></div>
+</section>
+
+<!-- 環境 -->
+<section id="env">
+  <div class="card">
+    <div class="row" style="justify-content:space-between"><h2 style="margin:0">外部ツール</h2>
+      <button class="p" id="instbtn" onclick="install(null)">不足ツールを自動セットアップ</button></div>
+    <div id="instmsg" class="small muted"></div>
+    <table><thead><tr><th>ツール</th><th>状態</th><th>場所 / バージョン</th><th></th></tr></thead><tbody id="tools"></tbody></table>
+    <p id="encs" class="small muted"></p>
+  </div>
+</section>
+</main>
+
+<dialog id="asdlg"><div class="row" style="justify-content:space-between"><strong>並列数アシスト — <span id="asname"></span></strong><button class="b" onclick="asdlg.close()">閉じる</button></div>
+  <p class="small muted" id="asinfo"></p>
+  <div class="row"><label>主にエンコードする映像</label><select id="as-res"></select></div>
+  <div class="row"><label>CPU の使い方</label><select id="as-cpu"></select></div>
+  <div class="row"><label>残しておくメモリ（GB）</label><input type="number" id="as-mem" step="1" min="1" style="width:100px"><span class="small muted">OS や他のアプリ用です。既定は搭載メモリの 1 割（最低 4 GB）です</span></div>
+  <div class="row"><button class="b" onclick="assistCalc(false)">計算する</button><button class="p" onclick="assistCalc(true)">この値を保存</button><span id="asmsg" class="small"></span></div>
+  <table><thead><tr><th>エンコーダ</th><th>解像度</th><th>並列数 × スレッド</th><th>メモリ（目安 / 使える量）</th><th>決め手</th></tr></thead><tbody id="asrows"></tbody></table>
+  <p class="small muted">保存した値は、並列数・スレッドを 0（自動）にしているときに、ファイルの解像度（4K / 1080p 以下）に合わせて使われます。</p>
+</dialog>
+<dialog id="logdlg"><div class="row" style="justify-content:space-between"><strong id="logtitle"></strong><button class="b" onclick="logdlg.close()">閉じる</button></div><pre class="log" id="logbox"></pre></dialog>
+
+<script>
+let META=null, APPS={}, curLog=null, logNext=0;
+const $=id=>document.getElementById(id);
+window.addEventListener('unhandledrejection',e=>{const m=$('envchip');if(m){m.textContent='エラー: '+(e.reason&&e.reason.message||e.reason);m.className='chip ng'}});
+async function api(u,o={}){const r=await fetch(u,{headers:{'Content-Type':'application/json'},...o});if(!r.ok){let t=await r.text();try{t=JSON.parse(t).detail}catch(e){}throw new Error(t)}return r.json()}
+function opts(sel,map,val){sel.innerHTML='';for(const[k,v]of Object.entries(map)){const o=document.createElement('option');o.value=k;o.textContent=v;sel.appendChild(o)}if(val!==undefined&&val!==null)sel.value=String(val)}
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button,section').forEach(e=>e.classList.remove('on'));b.classList.add('on');$(b.dataset.t).classList.add('on');if(b.dataset.t==='env')loadEnv();if(b.dataset.t==='set')loadSet()});
+function tipOf(a,k){return (APPS[a]?.tips||{})[k]||''}
+function showOpt(){for(const a of META.apps)$('opt-'+a.id).classList.toggle('on',$('kind').value===a.id);$('probe').textContent=''}
+
+async function init(){
+  META=await api('/api/meta');
+  for(const a of META.apps)APPS[a.id]=a;
+  document.title=META.title;$('htitle').textContent=META.title;$('hsub').textContent=META.subtitle;
+  const first=META.apps[0]?.id||'main';$('hicon').src='/icon/'+first;$('favicon').href='/icon/'+first;
+  opts($('kind'),Object.fromEntries(META.apps.map(a=>[a.id,a.name+' — '+a.desc])));
+  $('kindrow').style.display=META.apps.length>1?'':'none';
+  const box=$('opts');box.innerHTML='';
+  for(const a of META.apps){const d=document.createElement('div');d.className='opt';d.id='opt-'+a.id;
+    for(const f of a.job_fields){const row=document.createElement('div');row.className='row';const t=tipOf(a.id,f.tip);
+      row.innerHTML=`<label>${esc(f.label)}${t?`<span class="tip" title="${esc(t)}">ⓘ</span>`:''}</label>`;
+      const sel=document.createElement('select');sel.dataset.k=f.key;opts(sel,f.choices,(a.job_defaults||{})[f.key]);
+      const it=(a.item_tips||{})[f.tip];if(it)sel.onchange=()=>sel.title=it[sel.value]||'';row.appendChild(sel);d.appendChild(row)}
+    const n=document.createElement('p');n.className='small muted';n.textContent='エンコーダ・画質などは「設定」タブの '+a.name+' で指定してください。';d.appendChild(n);
+    box.appendChild(d)}
+  showOpt();browse('');refresh();setInterval(refresh,2000);loadEnvChip();
+}
+
+// ---- キュー
+const ST={queued:'待機',running:'処理中',done:'完了',failed:'失敗',cancelled:'中止'};
+async function refresh(){
+  let s;try{s=await api('/api/state')}catch(e){return}
+  const tb=$('jobs');$('nojobs').style.display=s.jobs.length?'none':'';
+  tb.innerHTML=s.jobs.map(j=>`<tr>
+    <td title="${esc(j.path)}">${esc(j.name)}${j.output?`<div class="small muted" title="${esc(j.output)}">→ ${esc(j.output.split(/[\\/]/).pop())}</div>`:''}</td>
+    <td><img src="/icon/${j.kind}" width="18" style="vertical-align:middle"> ${esc(APPS[j.kind]?.name||j.kind)}</td>
+    <td class="small">${esc(j.option_text)}</td>
+    <td><div class="bar"><i style="width:${(j.progress*100).toFixed(1)}%"></i></div><div class="small muted">${(j.progress*100).toFixed(1)}% ${esc(j.state==='running'?j.label:'')}</div></td>
+    <td class="st-${j.state}" title="${esc(j.error)}">${ST[j.state]}${j.error?'<div class="small">'+esc(j.error).slice(0,80)+'</div>':''}</td>
+    <td style="white-space:nowrap"><button class="b" onclick="showLog('${j.id}','${esc(j.name)}')">ログ</button>
+      ${['queued','running'].includes(j.state)?`<button class="d" onclick="api('/api/jobs/${j.id}/cancel',{method:'POST'}).then(refresh)">中止</button>`:''}
+      ${['failed','cancelled'].includes(j.state)?`<button class="b" onclick="api('/api/jobs/${j.id}/retry',{method:'POST'}).then(refresh)">再実行</button>`:''}
+      ${j.state!=='running'?`<button class="b" onclick="api('/api/jobs/${j.id}',{method:'DELETE'}).then(refresh)">削除</button>`:''}</td></tr>`).join('');
+  if(curLog&&$('logdlg').open)pullLog();
+}
+async function showLog(id,name){curLog=id;logNext=0;$('logbox').textContent='';$('logtitle').textContent=name;$('logdlg').showModal();pullLog()}
+async function pullLog(){const r=await api(`/api/jobs/${curLog}/log?since=${logNext}`);if(r.lines.length){const b=$('logbox');const atEnd=b.scrollTop+b.clientHeight>=b.scrollHeight-20;b.textContent+=r.lines.join('\n')+'\n';if(atEnd)b.scrollTop=b.scrollHeight}logNext=r.next}
+
+// ---- ファイル
+let FS={path:'',files:[]};
+async function browse(p){
+  try{FS=await api('/api/fs?path='+encodeURIComponent(p))}catch(e){alert(e.message);return}
+  $('fspath').value=FS.path;$('fscur').textContent=FS.path||'場所を選ぶ';
+  const l=$('fslist');l.innerHTML='';
+  if(FS.parent!==null){const d=document.createElement('div');d.className='dir';d.textContent=' ..';d.onclick=()=>browse(FS.parent||'');l.appendChild(d)}
+  for(const d of FS.dirs){const e=document.createElement('div');e.className='dir';e.textContent=' '+d.name;e.onclick=()=>browse(d.path);l.appendChild(e)}
+  for(const f of FS.files){const e=document.createElement('div');e.className='file';
+    e.innerHTML=`<input type="checkbox" value="${esc(f.path)}"> <span>${esc(f.name)}</span> <span class="small muted">${(f.size/1e9).toFixed(2)} GB</span>`;
+    e.querySelector('span').style.cursor='pointer';e.querySelector('span').title='クリックで中身を表示';e.querySelector('span').onclick=()=>probe(f.path);l.appendChild(e)}
+  $('probe').textContent='';
+}
+function selAll(v){$('fslist').querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=v)}
+async function probe(p){$('probe').textContent='解析中…';try{const r=await api('/api/probe',{method:'POST',body:JSON.stringify({path:p,kind:$('kind').value})});
+  $('probe').innerHTML=`<b>${esc(p.split(/[\\/]/).pop())}</b><br>映像: ${esc(r.video||'—')}<br>音声: ${r.audio.map(a=>esc(a.label)).join('、')||'—'}${r.extra.map(x=>'<br>'+esc(x)).join('')}`}catch(e){$('probe').textContent=e.message}}
+async function addJobs(){
+  const kind=$('kind').value;let paths=[...$('fslist').querySelectorAll('input:checked')].map(c=>c.value);let rec=false;
+  if($('addfolder').checked&&FS.path){paths=[FS.path];rec=true}
+  if(!paths.length){$('addmsg').textContent='ファイルを選んでください';return}
+  const options={};$('opt-'+kind).querySelectorAll('[data-k]').forEach(el=>options[el.dataset.k]=el.value);
+  try{const r=await api('/api/jobs',{method:'POST',body:JSON.stringify({kind,paths,options,recursive:rec})});$('addmsg').textContent=`${r.added.length} 件をキューに追加しました`;selAll(false);refresh()}
+  catch(e){$('addmsg').textContent=e.message}
+}
+
+// ---- 設定
+function getv(s,f){if(f.includes('.')){const[a,b]=f.split(/\.(.+)/);return (s[a]||{})[b]??''}return s[f]}
+async function loadSet(){
+  const wrap=$('setcards');wrap.innerHTML='';
+  for(const a of META.apps){const card=document.createElement('div');card.className='card';card.innerHTML=`<h2>${esc(a.name)}（${esc(a.desc)}）</h2><div id="set-${a.id}"></div>`;
+   try{const s=await api('/api/settings/'+a.id);
+    const box=card.querySelector('div');
+    for(const[f,label,type,tip,choices]of a.settings_fields){const row=document.createElement('div');row.className='row';const t=tipOf(a.id,tip);
+      row.innerHTML=`<label>${esc(label)}${t?`<span class="tip" title="${esc(t)}">ⓘ</span>`:''}</label>`;let el;const v=getv(s,f);
+      if(type==='bool'){el=document.createElement('input');el.type='checkbox';el.checked=!!v}
+      else if(type==='text'||type==='number'){el=document.createElement('input');el.type=type;el.value=v??'';if(type==='number')el.step='any';if(type==='text')el.style.flex='1'}
+      else{el=document.createElement('select');opts(el,choices||{},v)}
+      el.dataset.f=f;el.dataset.type=type;row.appendChild(el);box.appendChild(row)}
+    if(a.assist){const ab=document.createElement('div');ab.className='row';ab.innerHTML=`<label>並列数アシスト</label><button class="b">質問に答えて並列数を決める…</button>`;
+      ab.querySelector('button').onclick=()=>openAssist(a.id);box.appendChild(ab)}
+    if(a.settings_note){const p=document.createElement('p');p.className='small muted';p.textContent=a.settings_note;box.appendChild(p)}
+    const r=document.createElement('div');r.className='row';r.innerHTML=`<button class="p">保存</button><span class="small" id="msg-${a.id}"></span>`;
+    r.querySelector('button').onclick=()=>saveSet(a.id);card.appendChild(r)
+   }catch(e){const p=document.createElement('p');p.className='small';p.style.color='var(--ng,#dc2626)';
+     p.textContent='設定を読み込めませんでした: '+e.message+'（Web 画面を再起動するか、インストーラーをもう一度実行してください）';card.appendChild(p)}
+   wrap.appendChild(card)}
+}
+async function saveSet(k){const data={};$('set-'+k).querySelectorAll('[data-f]').forEach(el=>{data[el.dataset.f]=el.dataset.type==='bool'?el.checked:el.dataset.type==='number'?+el.value:el.value});
+  try{await api('/api/settings/'+k,{method:'PUT',body:JSON.stringify(data)});$('msg-'+k).textContent='保存しました';setTimeout(()=>$('msg-'+k).textContent='',2500)}catch(e){$('msg-'+k).textContent=e.message}}
+
+// ---- 並列数アシスト
+let ASK=null;
+async function openAssist(k){ASK=k;const i=await api('/api/assist');const s=await api('/api/settings/'+k);const an=s.assist_answers||{};
+  $('asname').textContent=APPS[k].name;$('asinfo').textContent=`この PC: 論理プロセッサ ${i.cores} / 搭載メモリ ${i.mem} GB（いまの空き ${i.avail} GB）。仮想マシンでは割り当てた分が表示されます。`;
+  opts($('as-res'),i.res_options,an.res||'both');opts($('as-cpu'),i.cpu_options,an.cpu||'all');$('as-mem').value=an.mem_reserve??Math.max(4,Math.round(i.mem*0.1));
+  $('asrows').innerHTML='';$('asmsg').textContent='';$('asdlg').showModal();assistCalc(false)}
+async function assistCalc(save){try{const r=await api('/api/assist/'+ASK,{method:'POST',body:JSON.stringify({res:$('as-res').value,cpu:$('as-cpu').value,mem_reserve:+$('as-mem').value,save})});
+  $('asrows').innerHTML=r.rows.map(x=>`<tr><td>${esc(x.encoder.split('（')[0])}</td><td>${esc(x.res)}</td><td><b>${x.workers} 本 × ${x.threads}</b></td><td>${x.mem_need} / ${x.use_mem} GB</td><td class="${x.short?'st-failed':''}">${x.short?'メモリ不足（1 本でも足りません）':(x.limited_by==='memory'?'メモリ':'CPU')}</td></tr>`).join('');
+  $('asmsg').textContent=save?'保存しました（並列数・スレッドは「自動」に戻しました）':'';if(save){setTimeout(loadSet,300)}}catch(e){$('asmsg').textContent=e.message}}
+
+// ---- 環境
+async function loadEnvChip(){try{const r=await api('/api/env');const bad=r.tools.filter(t=>t.required&&!t.ok);const c=$('envchip');
+  c.className='chip '+(bad.length?'ng':'ok');c.textContent=bad.length?'要セットアップ: '+bad.map(t=>t.label).join(', '):'環境 OK'}catch(e){}}
+async function loadEnv(){
+  const r=await api('/api/env');
+  $('tools').innerHTML=r.tools.map(t=>`<tr><td>${esc(t.label)}</td><td><span class="chip ${t.ok?'ok':'ng'}">${t.ok?'✔':(t.required?'✖':'—')}</span></td>
+   <td class="small">${t.ok?esc(t.path)+'<br><span class="muted">'+esc(t.version)+'</span>':'<span class="muted">'+esc(t.note||'見つかりません')+'</span>'}</td>
+   <td>${t.downloadable?`<button class="b" onclick="install(['${t.name}'])">${t.ok?'更新':'取得'}</button>`:''}</td></tr>`).join('');
+  $('encs').innerHTML=r.extra.map(esc).join('<br>');
+  const i=r.installer;$('instbtn').disabled=i.running;$('instmsg').textContent=i.running?('セットアップ中: '+i.message):(i.error?('エラー: '+i.error):(i.message||''));
+  if(i.running)setTimeout(loadEnv,2000);else loadEnvChip();
+}
+async function install(names){await api('/api/env/install',{method:'POST',body:JSON.stringify({names})});setTimeout(loadEnv,500)}
+init();
+</script>
+</body>
+</html>
