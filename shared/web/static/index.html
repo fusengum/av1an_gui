@@ -46,7 +46,7 @@ input[type=text]{width:100%}
 .chip{border-radius:10px;padding:2px 10px;font-size:12px}
 .chip.ok{background:#1d3326;color:var(--ok)} .chip.ng{background:#3a2226;color:#ffb4bd}
 .tip{cursor:help;color:var(--muted);margin-left:3px}
-.fs{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:6px}
+.fs{max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:6px}
 .fs div{padding:6px 10px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;cursor:pointer}
 .fs div:hover{background:#1d2128}
 .fs .dir::before{content:"📁"} .fs .file{cursor:default}
@@ -67,27 +67,13 @@ dialog::backdrop{background:#0008}
 </header>
 <nav>
   <button data-t="queue" class="on">キュー</button>
-  <button data-t="add">ファイル追加</button>
   <button data-t="set">設定</button>
   <button data-t="env">環境</button>
 </nav>
 <main>
 
-<!-- キュー -->
+<!-- キュー（ファイル追加も同じ画面） -->
 <section id="queue" class="on">
-  <div class="card">
-    <div class="row" style="justify-content:space-between">
-      <h2 style="margin:0">ジョブ（上から順に 1 件ずつ処理）</h2>
-      <button class="b" onclick="api('/api/jobs/clear',{method:'POST'}).then(refresh)">終わったものを消去</button>
-    </div>
-    <table><thead><tr><th>ファイル</th><th>ツール</th><th>内容</th><th style="width:22%">進捗</th><th>状態</th><th></th></tr></thead>
-    <tbody id="jobs"></tbody></table>
-    <p id="nojobs" class="muted">ジョブはありません。「ファイル追加」から追加してください。</p>
-  </div>
-</section>
-
-<!-- 追加 -->
-<section id="add">
   <div class="grid2">
     <div class="card">
       <h2>ファイルを選ぶ（この VM 上のファイル）</h2>
@@ -106,6 +92,15 @@ dialog::backdrop{background:#0008}
       <div id="opts"></div>
       <div class="row" style="margin-top:14px"><button class="p" onclick="addJobs()">キューに追加</button><span id="addmsg" class="small"></span></div>
     </div>
+  </div>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">ジョブ（上から順に 1 件ずつ処理）</h2>
+      <button class="b" onclick="api('/api/jobs/clear',{method:'POST'}).then(refresh)">終わったものを消去</button>
+    </div>
+    <table><thead><tr><th>ファイル</th><th>ツール</th><th>内容</th><th style="width:22%">進捗</th><th>状態</th><th></th></tr></thead>
+    <tbody id="jobs"></tbody></table>
+    <p id="nojobs" class="muted">ジョブはありません。上でファイルを選んで「キューに追加」を押してください。</p>
   </div>
 </section>
 
@@ -207,7 +202,7 @@ async function addJobs(){
   if($('addfolder').checked&&FS.path){paths=[FS.path];rec=true}
   if(!paths.length){$('addmsg').textContent='ファイルを選んでください';return}
   const options={};$('opt-'+kind).querySelectorAll('[data-k]').forEach(el=>options[el.dataset.k]=el.value);
-  try{const r=await api('/api/jobs',{method:'POST',body:JSON.stringify({kind,paths,options,recursive:rec})});$('addmsg').textContent=`${r.added.length} 件をキューに追加しました`;selAll(false);refresh()}
+  try{const r=await api('/api/jobs',{method:'POST',body:JSON.stringify({kind,paths,options,recursive:rec})});$('addmsg').textContent=`${r.added.length} 件をキューに追加しました`;setTimeout(()=>$('addmsg').textContent='',4000);selAll(false);$('addfolder').checked=false;refresh()}
   catch(e){$('addmsg').textContent=e.message}
 }
 
