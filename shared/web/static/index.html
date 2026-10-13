@@ -57,6 +57,19 @@ pre.log{background:#121418;border:1px solid var(--line);border-radius:6px;paddin
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line2);border-radius:8px;width:min(1100px,94vw)}
 dialog::backdrop{background:#0008}
 .opt{display:none} .opt.on{display:block}
+/* ファイルを追加のダイアログ */
+#adddlg{width:min(1180px,96vw);padding:0}
+#adddlg .dh{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line)}
+#adddlg .db{padding:14px 18px}
+#adddlg .df{display:flex;gap:10px;align-items:center;justify-content:flex-end;padding:12px 18px;border-top:1px solid var(--line)}
+#adddlg .fs{max-height:52vh}
+.fs .file{cursor:pointer}
+.fs .file.sel{background:#22304a}
+.fs .file .sz{margin-left:auto}
+.fs .file .info{background:none;border:1px solid var(--line2);border-radius:4px;color:var(--muted);padding:1px 7px;font-size:12px;cursor:pointer}
+.qhead{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between}
+.qhead .acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+@media (max-width:900px){#adddlg .grid2{grid-template-columns:1fr}}
 /* 設定: 左に見出し、右に「名前 / 入力欄 + 説明」 */
 .setwrap{display:grid;grid-template-columns:220px 1fr;gap:16px;align-items:start}
 .snav{display:flex;flex-direction:column;gap:2px;position:sticky;top:12px}
@@ -96,12 +109,32 @@ details.adv{margin-top:8px} details.adv>summary{cursor:pointer;color:var(--muted
 </nav>
 <main>
 
-<!-- キュー（ファイル追加も同じ画面） -->
+<!-- キュー -->
 <section id="queue" class="on">
   <div class="banner" id="afterbanner"><span id="aftertext"></span><button class="b" onclick="setAfter('none')">取り消す</button></div>
-  <div class="grid2">
-    <div class="card">
-      <h2>ファイルを選ぶ（この VM 上のファイル）</h2>
+  <div class="card">
+    <div class="qhead">
+      <h2 style="margin:0">ジョブ（上から順に 1 件ずつ処理）<span id="qstate" class="small" style="margin-left:10px;font-weight:400"></span></h2>
+      <div class="acts">
+        <button class="p" onclick="openAdd()">ファイルを追加…</button>
+        <span class="small muted" title="キューのファイルがすべて終わった後の動作です。実行の 60 秒前から取り消せます。停止した場合や、最後のファイルを中止した場合は実行しません。デスクトップ版と共通です。">終わったら</span>
+        <select id="after" onchange="setAfter(this.value)"></select>
+        <button class="d" id="qstop" style="display:none" title="処理中のものは待機に戻ります。次に開始すると続きから再開します" onclick="api('/api/queue/stop',{method:'POST'}).then(refresh)">停止</button>
+        <button class="p" id="qstart" style="display:none" onclick="api('/api/queue/start',{method:'POST'}).then(refresh)">エンコード開始</button>
+        <button class="b" onclick="api('/api/jobs/clear',{method:'POST'}).then(refresh)">終わったものを消去</button>
+      </div>
+    </div>
+    <div id="addmsg" class="small" style="margin:6px 0 0"></div>
+    <table><thead><tr><th>ファイル</th><th>ツール</th><th>内容</th><th style="width:22%">進捗</th><th>状態</th><th></th></tr></thead>
+    <tbody id="jobs"></tbody></table>
+    <p id="nojobs" class="muted">ジョブはありません。「ファイルを追加…」から追加してください。</p>
+  </div>
+</section>
+
+<dialog id="adddlg">
+  <div class="dh"><strong>ファイルを追加（このサーバーの PC 上のファイル）</strong><button class="b" onclick="adddlg.close()">閉じる</button></div>
+  <div class="db grid2">
+    <div>
       <div class="row"><input type="text" id="fspath" placeholder="フォルダのパス" onkeydown="if(event.key==='Enter')browse(this.value)"><button class="b" onclick="browse(fspath.value)">開く</button></div>
       <div class="row small muted"><span id="fscur"></span></div>
       <div class="fs" id="fslist"></div>
@@ -109,29 +142,17 @@ details.adv{margin-top:8px} details.adv>summary{cursor:pointer;color:var(--muted
         <button class="b" onclick="selAll(true)">すべて選択</button><button class="b" onclick="selAll(false)">選択解除</button>
         <label style="min-width:auto"><input type="checkbox" id="addfolder"> このフォルダ全体（サブフォルダも）を追加</label>
       </div>
-      <div id="probe" class="small muted"></div>
     </div>
-    <div class="card">
+    <div>
       <h2>処理内容</h2>
       <div class="row" id="kindrow"><label>ツール</label><select id="kind" onchange="showOpt()"></select></div>
       <div id="opts"></div>
-      <div class="row" style="margin-top:14px"><button class="p" onclick="addJobs()">キューに追加</button><span id="addmsg" class="small"></span></div>
+      <div id="probe" class="small muted" style="margin-top:12px"></div>
     </div>
   </div>
-  <div class="card">
-    <div class="row" style="justify-content:space-between">
-      <h2 style="margin:0">ジョブ（上から順に 1 件ずつ処理）<span id="qstate" class="small" style="margin-left:10px;font-weight:400"></span></h2>
-      <div class="after"><span class="small muted" title="キューのファイルがすべて終わった後の動作です。実行の 60 秒前から取り消せます。すべて中止した場合や、最後のファイルを中止した場合は実行しません。デスクトップ版と共通です。">終わったら</span>
-        <select id="after" onchange="setAfter(this.value)"></select>
-      <button class="d" id="qstop" style="display:none" title="処理中のものは待機に戻ります。次に開始すると続きから再開します" onclick="api('/api/queue/stop',{method:'POST'}).then(refresh)">停止</button>
-      <button class="p" id="qstart" style="display:none" onclick="api('/api/queue/start',{method:'POST'}).then(refresh)">エンコード開始</button>
-      <button class="b" onclick="api('/api/jobs/clear',{method:'POST'}).then(refresh)">終わったものを消去</button></div>
-    </div>
-    <table><thead><tr><th>ファイル</th><th>ツール</th><th>内容</th><th style="width:22%">進捗</th><th>状態</th><th></th></tr></thead>
-    <tbody id="jobs"></tbody></table>
-    <p id="nojobs" class="muted">ジョブはありません。上でファイルを選んで「キューに追加」を押してください。</p>
-  </div>
-</section>
+  <div class="df"><span id="addsel" class="small muted" style="margin-right:auto"></span>
+    <button class="b" onclick="adddlg.close()">キャンセル</button><button class="p" onclick="addJobs()">キューに追加</button></div>
+</dialog>
 
 <!-- 設定 -->
 <section id="set">
@@ -187,7 +208,7 @@ async function init(){
       const it=(a.item_tips||{})[f.tip];if(it)sel.onchange=()=>sel.title=it[sel.value]||'';row.appendChild(sel);d.appendChild(row)}
     const n=document.createElement('p');n.className='small muted';n.textContent='エンコーダ・画質などは「設定」タブの '+a.name+' で指定してください。';d.appendChild(n);
     box.appendChild(d)}
-  showOpt();browse('');refresh();setInterval(refresh,2000);loadEnvChip();
+  showOpt();refresh();setInterval(refresh,2000);loadEnvChip();
 }
 
 // ---- キュー
@@ -221,32 +242,46 @@ function showAfter(a){if(!a)return;const sel=$('after');
   else if(a.message&&a.action==='none'){b.style.display='none'}
   else b.style.display='none'}
 async function setAfter(v){afterTouched=Date.now();try{showAfter(await api('/api/after',{method:'POST',body:JSON.stringify({action:v})}))}catch(e){alert(e.message)}}
+document.addEventListener('change',e=>{if(e.target&&e.target.id==='addfolder')selUpdate()});
 async function showLog(id,name){curLog=id;logNext=0;$('logbox').textContent='';$('logtitle').textContent=name;$('logdlg').showModal();pullLog()}
 async function pullLog(){const r=await api(`/api/jobs/${curLog}/log?since=${logNext}`);if(r.lines.length){const b=$('logbox');const atEnd=b.scrollTop+b.clientHeight>=b.scrollHeight-20;b.textContent+=r.lines.join('\n')+'\n';if(atEnd)b.scrollTop=b.scrollHeight}logNext=r.next}
 
-// ---- ファイル
+// ---- ファイルを追加（ダイアログ）
 let FS={path:'',files:[]};
+function lastDir(v){try{if(v!==undefined)localStorage.setItem('av1gui.lastdir',v);return localStorage.getItem('av1gui.lastdir')||''}catch(e){return ''}}
+async function openAdd(){
+  $('addfolder').checked=false;$('probe').textContent='';$('adddlg').showModal();
+  await browse(lastDir());if(!FS.path&&lastDir())await browse('')}
 async function browse(p){
-  try{FS=await api('/api/fs?path='+encodeURIComponent(p))}catch(e){alert(e.message);return}
-  $('fspath').value=FS.path;$('fscur').textContent=FS.path||'場所を選ぶ';
+  let r;try{r=await api('/api/fs?path='+encodeURIComponent(p))}catch(e){if(p){return browse('')}alert(e.message);return}
+  FS=r;$('fspath').value=FS.path;$('fscur').textContent=FS.path||'場所を選ぶ';if(FS.path)lastDir(FS.path);
   const l=$('fslist');l.innerHTML='';
   if(FS.parent!==null){const d=document.createElement('div');d.className='dir';d.textContent=' ..';d.onclick=()=>browse(FS.parent||'');l.appendChild(d)}
   for(const d of FS.dirs){const e=document.createElement('div');e.className='dir';e.textContent=' '+d.name;e.onclick=()=>browse(d.path);l.appendChild(e)}
   for(const f of FS.files){const e=document.createElement('div');e.className='file';
-    e.innerHTML=`<input type="checkbox" value="${esc(f.path)}"> <span>${esc(f.name)}</span> <span class="small muted">${(f.size/1e9).toFixed(2)} GB</span>`;
-    e.querySelector('span').style.cursor='pointer';e.querySelector('span').title='クリックで中身を表示';e.querySelector('span').onclick=()=>probe(f.path);l.appendChild(e)}
-  $('probe').textContent='';
+    e.innerHTML=`<input type="checkbox" value="${esc(f.path)}"> <span>${esc(f.name)}</span> <button class="info" title="映像・音声・字幕を表示">中身</button> <span class="small muted sz">${(f.size/1e9).toFixed(2)} GB</span>`;
+    const cb=e.querySelector('input');
+    e.onclick=ev=>{if(ev.target.classList.contains('info'))return;if(ev.target!==cb)cb.checked=!cb.checked;selUpdate()};
+    e.querySelector('.info').onclick=()=>probe(f.path);l.appendChild(e)}
+  if(!FS.files.length&&FS.path){const n=document.createElement('div');n.className='file small muted';n.style.cursor='default';n.textContent='このフォルダに動画はありません';l.appendChild(n)}
+  $('probe').textContent='';selUpdate();
 }
-function selAll(v){$('fslist').querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=v)}
+function selUpdate(){const cs=[...$('fslist').querySelectorAll('input[type=checkbox]')];
+  cs.forEach(c=>c.closest('.file').classList.toggle('sel',c.checked));
+  const n=cs.filter(c=>c.checked).length;$('addsel').textContent=$('addfolder').checked?'このフォルダ全体を追加します':(n?`${n} 件を選んでいます`:'')}
+function selAll(v){$('fslist').querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=v);selUpdate()}
 async function probe(p){$('probe').textContent='解析中…';try{const r=await api('/api/probe',{method:'POST',body:JSON.stringify({path:p,kind:$('kind').value})});
   $('probe').innerHTML=`<b>${esc(p.split(/[\\/]/).pop())}</b><br>映像: ${esc(r.video||'—')}<br>音声: ${r.audio.map(a=>esc(a.label)).join('、')||'—'}<br>字幕: ${(r.subtitles||[]).map(a=>esc(a.label)).join('、')||'—'}${r.extra.map(x=>'<br>'+esc(x)).join('')}`}catch(e){$('probe').textContent=e.message}}
 async function addJobs(){
   const kind=$('kind').value;let paths=[...$('fslist').querySelectorAll('input:checked')].map(c=>c.value);let rec=false;
   if($('addfolder').checked&&FS.path){paths=[FS.path];rec=true}
-  if(!paths.length){$('addmsg').textContent='ファイルを選んでください';return}
+  if(!paths.length){$('addsel').textContent='ファイルを選んでください';return}
   const options={};$('opt-'+kind).querySelectorAll('[data-k]').forEach(el=>options[el.dataset.k]=el.value);
-  try{const r=await api('/api/jobs',{method:'POST',body:JSON.stringify({kind,paths,options,recursive:rec})});$('addmsg').textContent=`${r.added.length} 件をキューに追加しました`+(QACTIVE?'':'（「エンコード開始」で始まります）');setTimeout(()=>$('addmsg').textContent='',4000);selAll(false);$('addfolder').checked=false;refresh()}
-  catch(e){$('addmsg').textContent=e.message}
+  try{const r=await api('/api/jobs',{method:'POST',body:JSON.stringify({kind,paths,options,recursive:rec})});
+    $('adddlg').close();
+    $('addmsg').textContent=`${r.added.length} 件をキューに追加しました`+(QACTIVE?'':'（「エンコード開始」で始まります）');
+    setTimeout(()=>$('addmsg').textContent='',6000);selAll(false);$('addfolder').checked=false;refresh()}
+  catch(e){$('addsel').textContent=e.message}
 }
 
 // ---- 設定（各ツールの settings_sections。左の見出しを選ぶと右にその項目を出す）
