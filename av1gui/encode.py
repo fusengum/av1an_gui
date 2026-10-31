@@ -258,6 +258,7 @@ class AvPipeline:
         log(f"分割: 1 つ最大 {max_sec:g} 秒・最小 {min_len} フレーム（{split_how}）")
         common = ["-e", s.encoder, "-c", "mkvmerge", "-w", str(workers), "--pix-format", "yuv420p10le",
                   "--audio-params=-an", "-y", "--keep", "--sc-method", s.sc_method,
+                  "--cache-mode", "temp",           # lsmash / ffms2 の索引を入力の隣（読み取り専用のことがある）に書かない
                   "--extra-split-sec", f"{max_sec:g}", "--min-scene-len", str(min_len),
                   "--video-params=" + " ".join(params)]
         if height > 1080 and not scale:
