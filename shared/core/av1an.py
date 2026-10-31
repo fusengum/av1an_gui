@@ -127,10 +127,40 @@ def vapoursynth_ok() -> bool:
         return False
 
 
+# VapourSynth での名前空間（Docker イメージの中に何があるかを調べるのに使う）
+VS_NAMESPACES = {"lsmash": "lsmas", "ffms2": "ffms2"}
+_docker_plugins: dict[str, list[str]] = {}       # イメージの ID → 入っているプラグイン
+
+
+def docker_vs_plugins() -> list[str]:
+    """Docker イメージに入っている読み込みプラグイン。イメージは更新で中身が変わる（lsmash が無くなったことがある）ので、
+    決め打ちにせずイメージの ID ごとに一度だけ調べる"""
+    d = docker_bin()
+    if not d:
+        return []
+    try:
+        r = subprocess.run([d, "image", "inspect", "-f", "{{.Id}}", DOCKER_IMAGE], capture_output=True, text=True,
+                           timeout=20)
+        iid = r.stdout.strip()
+        if r.returncode != 0 or not iid:
+            return []
+        if iid not in _docker_plugins:
+            code = "import vapoursynth as vs; print(' '.join(p.namespace for p in vs.core.plugins()))"
+            r = subprocess.run([d, "run", "--rm", "--entrypoint", "python3", DOCKER_IMAGE, "-c", code],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                return []
+            ns = set(r.stdout.split())
+            _docker_plugins[iid] = [k for k, n in VS_NAMESPACES.items() if n in ns]
+        return _docker_plugins[iid]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def vs_plugins() -> list[str]:
     """使える読み込みプラグイン（lsmash / ffms2）"""
     if not IS_WIN:
-        return list(VSPLUGINS)
+        return docker_vs_plugins()
     return [k for k, (dll, _r, _n) in VSPLUGINS.items() if (VSPLUGIN_DIR / dll).is_file()]
 
 
@@ -138,9 +168,7 @@ def auto_chunk_method() -> str:
     """分割方法の「自動」: lsmash → ffms2 → hybrid。
     lsmash / ffms2 は索引を作って必要な場面だけを読むので、映像を切り出した複製（split）を作らずに済む。
     hybrid はプラグインが要らない代わりに、キーフレームを調べるための読み込みと、元と同じ大きさの書き出しが増える"""
-    if not IS_WIN:
-        return "lsmash"
-    if vapoursynth_ok():
+    if not IS_WIN or vapoursynth_ok():
         have = vs_plugins()
         for m in ("lsmash", "ffms2"):
             if m in have:
@@ -150,7 +178,9 @@ def auto_chunk_method() -> str:
 
 def vsplugins_status() -> tuple[bool, str]:
     if not IS_WIN:
-        return True, "Docker イメージに同梱"
+        have = docker_vs_plugins()
+        names = " / ".join(VSPLUGINS[k][2] for k in have)
+        return True, f"Docker イメージに同梱: {names}" if have else "Docker イメージに無し（hybrid で分割します）"
     if not vapoursynth_ok():
         return False, "VapourSynth が見つかりません（ライブラリを入れ直してください）"
     have = vs_plugins()

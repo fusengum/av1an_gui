@@ -73,7 +73,7 @@ TIPS = {
                        "そのバージョンで使えない設定は自動で外します（SVT-AV1 のみ）。Linux（Docker）では使えません。"),
     "chunk": _h("分割方法",
                 "映像の切り出し方です。<br>"
-                "・<b>自動</b>: lsmash → ffms2 → hybrid の順に、使えるものを選びます（Linux の Docker は lsmash）<br>"
+                "・<b>自動</b>: lsmash → ffms2 → hybrid の順に、使えるものを選びます（Linux は Docker イメージに入っているもの）<br>"
                 "・<b>lsmash / ffms2</b>: 索引を作って必要な場面だけを読むので、エンコードを始めるまでが速いです。"
                 "VapourSynth のプラグイン（L-SMASH-Works / FFMS2）を使います（セットアップで自動取得します）<br>"
                 "・<b>hybrid / segment</b>: プラグインが要りませんが、キーフレームを調べるための読み込みと、"

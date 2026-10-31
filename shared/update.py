@@ -164,6 +164,9 @@ def download(info: dict, progress=None) -> Path:
                 raise UpdateError(f"更新の ZIP に不正なパスがあります: {n}")
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(zf.read(n))
+            mode = (zf.getinfo(n).external_attr >> 16) & 0o777
+            if not IS_WIN and (mode & 0o111 or dst.suffix == ".sh"):   # zipfile は実行権を戻さない（./install.sh が動かなくなる）
+                dst.chmod((mode or 0o644) | 0o755)
     if not (NEW / "shared" / "__init__.py").is_file():
         shutil.rmtree(NEW, ignore_errors=True)
         raise UpdateError("更新の ZIP の中身が正しくありません（shared が見つかりません）")

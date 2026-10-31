@@ -82,7 +82,7 @@ SECTIONS = [
          _f("min_scene_len", "最小の長さ", "int", "min_scene", min=1, max=1000, suffix="フレーム",
             show_if={"split": "manual"}, hint="これより短い場面では切りません。目安は 1 秒分のフレーム数です。"),
          _f("chunk_method", "分割方法", "select", "chunk", choices=CHUNK_LABELS, advanced=True,
-            hint="「自動」で問題ありません（Windows は hybrid、Linux は lsmash）。"),
+            hint="「自動」で問題ありません（使えるプラグインから選びます。無ければ hybrid）。"),
          _f("sc_method", "シーン検出", "select", "sc", choices=SC_LABELS, advanced=True,
             hint="「速い」は検出が速くなりますが、切れ目の精度が下がります。"),
      ]},
