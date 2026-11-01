@@ -15,13 +15,13 @@
 - デスクトップ版（Qt）と Web 画面（ブラウザから操作。VM・サーバー向け）。キューと進捗は両方で共通です
 - 終わった後のスリープ・休止状態・シャットダウン
 - 画面からの更新
-- Windows / Linux。**Python も入っていない状態から全自動で環境を作ります**（Linux 版は未検証です）
+- Windows / Linux。**Python も入っていない状態から全自動で環境を作ります**
 
 ## 動作環境
 
 | | |
 |---|---|
-| OS | Windows 10 / 11（64 ビット）、Linux（Debian / Ubuntu / Fedora 系。**未検証**） |
+| OS | Windows 10 / 11（64 ビット）、Linux（Debian / Ubuntu / Fedora 系。Ubuntu 24.04 で確認済み） |
 | CPU | AVX2 が使える CPU をおすすめします（使えないとエンコーダが大幅に遅くなります） |
 | メモリ | 並列数に合わせて自動で調整します。4K の SVT-AV1 は 1 本あたり約 7 GB が目安です |
 | ディスク | 作業フォルダに、入力ファイルと同じくらいの空きがあると安心です |
@@ -41,7 +41,7 @@
 
 ### Linux（Debian / Ubuntu / Fedora 系）
 
-> **Linux 版は、まだ実際の環境で動作を確かめていません。** インストーラー・Docker での av1an の実行・シーン検出の進み具合・更新などは、Windows 版と同じ考え方で作ってありますが、うまく動かないことがあります。不具合があれば [Issues](https://github.com/fusengum/av1an_gui/issues) で知らせてください。
+> Ubuntu 24.04（Proxmox の LXC・Web 画面だけの構成）で、インストールからエンコードまでを確かめています。デスクトップ版と、Debian・Fedora ではまだ確かめていません。不具合があれば [Issues](https://github.com/fusengum/av1an_gui/issues) で知らせてください。
 
 ```bash
 ./install.sh
@@ -72,6 +72,24 @@
   - Linux: 足りない OS のパッケージ（apt / dnf。入っているものは入れ直しません）、`docker` グループへの追加、Web 画面の systemd のサービス、ファイアウォールの規則（無いときだけ足します）、ランチャー（`~/.local/share/applications`）
   - 作業フォルダ（`av1gui_<番号>`。英数字のパスが要るときは `EncodeTemp` などの中に作ります）
 - アンインストールで消すのは、上のうち**このフォルダのものだけ**です。別の場所に入れた同じツールや、利用者のファイル・プロセス・ファイアウォールの規則には触れません。OS のパッケージと av1an の Docker イメージは残します（イメージは `--docker` を付けたときだけ消します）
+
+### Proxmox で動かす場合（LXC がおすすめ）
+
+Proxmox VE のホストで `proxmox_lxc.sh` を実行すると、av1an_gui 用の LXC を 1 つ作り、その中に Web 画面だけの構成で入れます。
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/fusengum/av1an_gui/main/proxmox_lxc.sh
+bash proxmox_lxc.sh --mount /mnt/video
+```
+
+- LXC はホストのカーネルをそのまま使うので、VM と違って仮想化による損失がありません。コア数は制限せず、ホストの全スレッドを LXC に見せます（`--cores` で絞れます）
+- av1an は LXC の中の Docker で動かします（そのために `nesting` と `keyctl` を有効にします）。Docker による損失は、同じイメージを chroot で動かした場合と比べて 1% 前後でした
+- メモリは、いま空いている分の 8 割を渡します（`--memory 64` のように GB で指定できます）。並列数はこのメモリと CPU 数で決まります
+- `--mount ホストのフォルダ[:LXC の中のパス][:ro]` で、動画のフォルダを LXC に繋ぎます（何度でも指定できます。中のパスを省くと `/mnt/<フォルダ名>`）。出来上がったファイルは元のファイルと同じフォルダに書くので、書き出し先にするフォルダは読み取り専用にしないでください。非特権の LXC の root は、ホストからは UID 100000 に見えます。そのユーザーが書けるフォルダにしてください
+- ホストに足すのは、この LXC と（無ければ）Ubuntu 24.04 のテンプレートだけです。消すときは `pct stop <ID> && pct destroy <ID>` です
+- そのほかの指定: `--id` / `--name` / `--disk`（GB）/ `--storage` / `--bridge` / `--ip 192.168.1.50/24 --gw 192.168.1.1` / `--port` / `--version`（リリースのタグ）/ `--src`（手元の av1an_gui のフォルダを入れる）
+
+参考: Xeon E5-2697 v4 ×2（72 スレッド・NUMA 2 ノード）の LXC で、既定の設定（SVT-AV1・preset 4・並列数は自動）のとき、並列でエンコードしている間はホストの CPU の 92%（4K・9 本 × 8 スレッド）〜 97%（1080p・18 本 × 4 スレッド）を使いました。始めの索引作りとシーン検出の間は、数コアしか使いません。
 
 ### Proxmox などの VM で多コアを使う場合
 
@@ -248,6 +266,7 @@ shared/        共通部分（外部ツールの取得・解析・実行・設�
   apps.ps1     インストーラー用のツール判定
 av1gui/        av1an_gui 本体（app.json / env.py / webapp.py / settings_schema.py を持つ）
 install*.ps1 / install.sh / uninstall* / web_firewall*   インストーラー類
+proxmox_lxc.sh Proxmox のホストで、av1an_gui 用の LXC を作って入れる
 ```
 
 `shared` は、フォルダ直下の `app.json` を持つパッケージを「ツール」として扱います。ツールは `env.py`（使う外部ツールの一覧）と `webapp.py`（Web 画面への登録）を持てば、インストーラー・設定画面・Web 画面にそのまま載ります。設定項目は `settings_sections`（見出し付きの定義）で渡すと、デスクトップ版の設定画面と Web 画面の設定タブが同じ定義から作られます。
