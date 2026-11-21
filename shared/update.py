@@ -73,6 +73,12 @@ def source() -> tuple[str, str]:
     return "", ""
 
 
+def _manual_message() -> str:
+    """手動で更新するフォルダなら、その案内（取得・入れ替えをしない理由）"""
+    kind, url = source()
+    return f"このフォルダは手動で更新します（{url} から新しい ZIP を取ってください）" if kind == "manual" else ""
+
+
 def repo() -> str:
     """更新元の GitHub リポジトリ（手動で更新するフォルダや、指定が無いときは ""）"""
     kind, val = source()
@@ -146,6 +152,8 @@ def check(force: bool = False) -> dict:
 
 def download(info: dict, progress=None) -> Path:
     """リリースの ZIP を取ってきて logs/update/new に展開する。progress(説明, 0..1 or -1)"""
+    if _manual_message():
+        raise UpdateError(_manual_message())
     progress = progress or (lambda m, f: None)
     progress(f"{info['version']} を取得中…", -1)
     z = info["zip"]
@@ -365,6 +373,11 @@ def _start_again(relaunch: set[str]) -> None:
 
 
 def apply(relaunch: list[str]) -> int:
+    msg = _manual_message()      # 入れ替えはいつもディスク上の新しいコードで動くので、ここで必ず止める
+    if msg:
+        _log(msg)
+        _status("failed", msg, app_version())
+        return 1
     lock = _lock()
     if lock is None:
         _log("ほかの更新が動いているため、やめました")

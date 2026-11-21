@@ -693,7 +693,7 @@ def update_apply():
         return {"ok": True}
     info = U.check()
     if info.get("manual"):
-        raise HTTPException(400, f"このフォルダは手動で更新します（{info['manual']} から新しい ZIP を取ってください）")
+        raise HTTPException(400, U._manual_message())
     if not info.get("available"):
         raise HTTPException(400, info.get("error") or "新しいバージョンはありません")
 
