@@ -60,13 +60,29 @@ def _keep(rel: Path) -> bool:
     return len(parts) == 1 and parts[0].startswith("settings") and parts[0].endswith(".json")
 
 
-def repo() -> str:
-    """更新元の GitHub リポジトリ（ツールの app.json の update.github。最初に見つかったもの）"""
+def source() -> tuple[str, str]:
+    """更新元。ツールの app.json の update を order 順に見て、最初に見つかったもの:
+    ("github", "owner/repo")  GitHub のリリースから取ってくる（update.github）
+    ("manual", URL)           このフォルダは手動で更新する（update.manual。新しい版の置き場のページ）
+    ("", "")                  指定なし"""
     for i in app_infos():
-        r = (i.get("update") or {}).get("github", "")
-        if r:
-            return r
-    return ""
+        u = i.get("update") or {}
+        for kind in ("manual", "github"):
+            if u.get(kind):
+                return kind, u[kind]
+    return "", ""
+
+
+def _manual_message() -> str:
+    """手動で更新するフォルダなら、その案内（取得・入れ替えをしない理由）"""
+    kind, url = source()
+    return f"このフォルダは手動で更新します（{url} から新しい ZIP を取ってください）" if kind == "manual" else ""
+
+
+def repo() -> str:
+    """更新元の GitHub リポジトリ（手動で更新するフォルダや、指定が無いときは ""）"""
+    kind, val = source()
+    return val if kind == "github" else ""
 
 
 def _get(url: str, timeout: float = 30) -> bytes:
@@ -105,6 +121,10 @@ def latest() -> dict:
 def check(force: bool = False) -> dict:
     """新しい版があるか。結果は 1 日（失敗したときは 1 時間）保存し、その間は取りに行かない"""
     cur = app_version()
+    kind, url = source()
+    if kind == "manual":        # ネットには出ない（前に GitHub を見ていたころの結果が残っていても使わない）
+        return {"current": cur, "latest": "", "available": False, "error": "", "manual": url, "url": url,
+                "checked": time.time()}
     if not force:
         try:
             c = json.loads(CHECK_FILE.read_text(encoding="utf-8"))
@@ -132,6 +152,8 @@ def check(force: bool = False) -> dict:
 
 def download(info: dict, progress=None) -> Path:
     """リリースの ZIP を取ってきて logs/update/new に展開する。progress(説明, 0..1 or -1)"""
+    if _manual_message():
+        raise UpdateError(_manual_message())
     progress = progress or (lambda m, f: None)
     progress(f"{info['version']} を取得中…", -1)
     z = info["zip"]
@@ -351,6 +373,11 @@ def _start_again(relaunch: set[str]) -> None:
 
 
 def apply(relaunch: list[str]) -> int:
+    msg = _manual_message()      # 入れ替えはいつもディスク上の新しいコードで動くので、ここで必ず止める
+    if msg:
+        _log(msg)
+        _status("failed", msg, app_version())
+        return 1
     lock = _lock()
     if lock is None:
         _log("ほかの更新が動いているため、やめました")

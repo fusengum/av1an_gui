@@ -692,6 +692,8 @@ def update_apply():
     if UPDATE["running"]:
         return {"ok": True}
     info = U.check()
+    if info.get("manual"):
+        raise HTTPException(400, U._manual_message())
     if not info.get("available"):
         raise HTTPException(400, info.get("error") or "新しいバージョンはありません")
 

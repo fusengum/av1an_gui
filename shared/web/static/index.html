@@ -391,6 +391,8 @@ async function loadUpdate(force){
   if(!$('updinfo'))return;
   $('updmsg').textContent=force?'確認しています…':'';
   let u;try{u=await api('/api/update'+(force?'?force=1':''))}catch(e){$('updmsg').textContent=e.message;return}
+  if(u.manual){$('updinfo').innerHTML=`現在のバージョン <b>${esc(u.current)}</b>　／　このフォルダは手動で更新します。<a href="${esc(u.manual)}" target="_blank" rel="noopener">リリースのページ</a> から新しい ZIP を取り、このフォルダに上書きで展開してから、インストーラーを実行してください（設定・キュー・取得した外部ツールはそのまま残ります）。`;
+    $('updbtn').style.display='none';$('updmsg').textContent='';return}
   $('updinfo').innerHTML=`現在のバージョン <b>${esc(u.current)}</b>`+(u.latest?`　／　最新バージョン <b>${esc(u.latest)}</b>`:'')+
     (u.available?' <span class="chip ok">新しいバージョンがあります</span>':(u.latest?' <span class="muted">（最新です）</span>':''))+
     (u.notes?`<pre class="log" style="max-height:200px;margin-top:8px">${esc(u.notes)}</pre>`:'');

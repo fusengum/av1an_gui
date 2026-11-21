@@ -171,7 +171,9 @@ RestartSec=2
 WantedBy=multi-user.target
 UNIT
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable --now "$WEBSVC"
+  # 入れ直し・上書きで更新したあとも新しいコードで動くように、動いていても起動し直す（enable --now は起動し直さない）
+  $SUDO systemctl enable "$WEBSVC"
+  $SUDO systemctl restart "$WEBSVC"
   # ファイアウォール: 規則がまだ無いときだけ足し、足したことを tools/firewall_added に残す
   # （アンインストールでは、ここで足したものだけを消す。利用者が自分で足した同じ規則は消さない）
   FWREC="$TOOLS/firewall_added"
