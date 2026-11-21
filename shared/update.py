@@ -60,13 +60,23 @@ def _keep(rel: Path) -> bool:
     return len(parts) == 1 and parts[0].startswith("settings") and parts[0].endswith(".json")
 
 
-def repo() -> str:
-    """更新元の GitHub リポジトリ（ツールの app.json の update.github。最初に見つかったもの）"""
+def source() -> tuple[str, str]:
+    """更新元。ツールの app.json の update を order 順に見て、最初に見つかったもの:
+    ("github", "owner/repo")  GitHub のリリースから取ってくる（update.github）
+    ("manual", URL)           このフォルダは手動で更新する（update.manual。新しい版の置き場のページ）
+    ("", "")                  指定なし"""
     for i in app_infos():
-        r = (i.get("update") or {}).get("github", "")
-        if r:
-            return r
-    return ""
+        u = i.get("update") or {}
+        for kind in ("manual", "github"):
+            if u.get(kind):
+                return kind, u[kind]
+    return "", ""
+
+
+def repo() -> str:
+    """更新元の GitHub リポジトリ（手動で更新するフォルダや、指定が無いときは ""）"""
+    kind, val = source()
+    return val if kind == "github" else ""
 
 
 def _get(url: str, timeout: float = 30) -> bytes:
@@ -105,6 +115,10 @@ def latest() -> dict:
 def check(force: bool = False) -> dict:
     """新しい版があるか。結果は 1 日（失敗したときは 1 時間）保存し、その間は取りに行かない"""
     cur = app_version()
+    kind, url = source()
+    if kind == "manual":        # ネットには出ない（前に GitHub を見ていたころの結果が残っていても使わない）
+        return {"current": cur, "latest": "", "available": False, "error": "", "manual": url, "url": url,
+                "checked": time.time()}
     if not force:
         try:
             c = json.loads(CHECK_FILE.read_text(encoding="utf-8"))

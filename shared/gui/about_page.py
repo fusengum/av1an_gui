@@ -67,7 +67,7 @@ class AboutPage(QWidget):
         h.addWidget(self.btn_update)
         h.addStretch(1)
         gl.addLayout(h)
-        note = QLabel("新しいバージョンが出ていると、メイン画面の見出しにも「更新」が出ます（開いたときと 1 日 1 回確認します）。"
+        self.note = note = QLabel("新しいバージョンが出ていると、メイン画面の見出しにも「更新」が出ます（開いたときと 1 日 1 回確認します）。"
                       "設定・キュー・取得した外部ツールはそのまま残ります。")
         note.setWordWrap(True)
         note.setObjectName("muted")
@@ -109,7 +109,12 @@ class AboutPage(QWidget):
 
     def _show(self, u: dict, version: str = ""):
         cur = u.get("current") or version
-        if u.get("available"):
+        manual = u.get("manual")
+        if manual:
+            text = (f"現在のバージョン {html.escape(cur)}　—　このフォルダは手動で更新します。{_link(manual, 'リリースのページ')} から"
+                    "新しい ZIP を取り、このフォルダに上書きで展開してから、インストーラーを実行してください"
+                    "（設定・キュー・取得した外部ツールはそのまま残ります）。")
+        elif u.get("available"):
             text = f"新しいバージョン <b>{html.escape(u['latest'])}</b> があります（現在のバージョン {html.escape(cur)}）。"
             if u.get("url"):
                 text += f"　{_link(u['url'], '変更内容を見る')}"
@@ -121,6 +126,8 @@ class AboutPage(QWidget):
             text = f"現在のバージョン {html.escape(cur)}　—　「更新を確認」で、新しいバージョンがあるか確かめます"
         self.status.setText(text)
         self.btn_update.setVisible(bool(u.get("available")) and self.start_update is not None)
+        self.btn_check.setVisible(not manual)
+        self.note.setVisible(not manual)
 
     def _check(self):
         if not self.check_fn:
